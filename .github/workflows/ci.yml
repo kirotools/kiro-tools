@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build backend
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Install frontend deps
+        working-directory: webui
+        run: npm install --legacy-peer-deps
+
+      - name: Build frontend
+        working-directory: webui
+        run: npm run build

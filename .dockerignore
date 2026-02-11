@@ -1,0 +1,5 @@
+target/
+webui/node_modules/
+webui/.vite/
+.git/
+*.md

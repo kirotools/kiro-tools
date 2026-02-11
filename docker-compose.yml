@@ -1,0 +1,17 @@
+services:
+  kiro-tools:
+    build: .
+    container_name: kiro-tools
+    restart: unless-stopped
+    ports:
+      - "8045:8045"
+    volumes:
+      - ${KIRO_DATA_DIR:-~/.kiro_tools}:/root/.kiro_tools
+      - ${KIRO_AUTH_DIR:-~/.aws/sso/cache}:/root/.aws/sso/cache:ro
+    environment:
+      - API_KEY=${API_KEY:-changeme}
+      - WEB_PASSWORD=${WEB_PASSWORD:-}
+      - AUTH_MODE=${AUTH_MODE:-all_except_health}
+      - KIRO_CREDS_FILE=/root/.aws/sso/cache/kiro-auth-token.json
+      - KIRO_DIST_PATH=/app/dist
+

@@ -1,0 +1,24 @@
+# Build
+/target/
+/dist/
+
+# WebUI
+/webui/node_modules/
+/webui/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+*.pem
+
+# Credentials
+kiro-auth-token.json
