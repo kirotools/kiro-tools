@@ -13,8 +13,7 @@ export function NavLogo() {
     const { t } = useTranslation();
     return (
         <Link to="/" draggable="false" className="flex w-full min-w-0 items-center gap-2 text-xl font-semibold text-gray-900 dark:text-base-content">
-
-            {/* 父容器宽度 < 200px 隐藏 */}
+            <img src="/logo.png" alt="Kiro Tools" className="w-8 h-8 rounded-lg shrink-0" />
             <span className="hidden @[200px]/logo:inline text-nowrap">{t('common.app_name', 'Kiro Tools')}</span>
         </Link>
     );
