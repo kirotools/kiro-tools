@@ -346,4 +346,47 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("Failed to fetch user info"), "Unexpected error: {}", err);
     }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_token_returns_directly_when_not_expiring() {
+        let token = crate::models::TokenData::new(
+            "access-123".to_string(),
+            "refresh-old".to_string(),
+            7200, // 2 hours — well above 5 min threshold
+            Some("test@example.com".to_string()),
+            Some("proj-1".to_string()),
+            None,
+        );
+
+        let result = ensure_fresh_token(&token, Some("acc-1")).await.unwrap();
+        // Should return the same token unchanged
+        assert_eq!(result.access_token, "access-123");
+        assert_eq!(result.refresh_token, "refresh-old");
+        assert_eq!(result.email, Some("test@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_token_response_deserialize_with_refresh_token() {
+        let json = r#"{
+            "access_token": "new-access",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "refresh_token": "new-refresh"
+        }"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.access_token, "new-access");
+        assert_eq!(resp.refresh_token, Some("new-refresh".to_string()));
+    }
+
+    #[test]
+    fn test_token_response_deserialize_without_refresh_token() {
+        let json = r#"{
+            "access_token": "new-access",
+            "expires_in": 3600,
+            "token_type": "Bearer"
+        }"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.access_token, "new-access");
+        assert_eq!(resp.refresh_token, None);
+    }
 }

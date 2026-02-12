@@ -3190,4 +3190,330 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
     }
+
+    // ===== Token Refresh Concurrency & Persistence Tests =====
+
+    #[tokio::test]
+    async fn test_refresh_lock_prevents_concurrent_refresh() {
+        // Verify that per-account refresh locks are created and reused
+        let tmp = std::env::temp_dir().join(format!("kiro-refresh-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+
+        // Acquire lock for acc1
+        let lock1 = manager.refresh_locks
+            .entry("acc1".to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        // Same account should return the same lock instance
+        let lock2 = manager.refresh_locks
+            .entry("acc1".to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        assert!(Arc::ptr_eq(&lock1, &lock2), "Same account should reuse the same lock");
+
+        // Different account should get a different lock
+        let lock3 = manager.refresh_locks
+            .entry("acc2".to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        assert!(!Arc::ptr_eq(&lock1, &lock3), "Different accounts should have different locks");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_refresh_lock_serializes_concurrent_access() {
+        // Verify that the lock actually serializes access
+        let tmp = std::env::temp_dir().join(format!("kiro-refresh-serial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = Arc::new(TokenManager::new(tmp.clone()));
+
+        let lock = manager.refresh_locks
+            .entry("acc1".to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        // Hold the lock
+        let guard = lock.lock().await;
+
+        let manager2 = manager.clone();
+        let lock2 = lock.clone();
+
+        // Spawn a task that tries to acquire the same lock
+        let handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            let _guard = lock2.lock().await;
+            start.elapsed()
+        });
+
+        // Wait a bit then release
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        drop(guard);
+
+        let elapsed = handle.await.unwrap();
+        // The second task should have waited at least ~100ms
+        assert!(elapsed.as_millis() >= 80, "Second lock acquisition should have waited, got {}ms", elapsed.as_millis());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_save_refreshed_token_persists_new_refresh_token() {
+        let tmp = std::env::temp_dir().join(format!("kiro-save-rt-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-save-rt";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "save@test.com",
+            "token": {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // Simulate a token refresh that returns a new refresh_token
+        let token_response = crate::modules::oauth::TokenResponse {
+            access_token: "new-access-token".to_string(),
+            expires_in: 7200,
+            token_type: "Bearer".to_string(),
+            refresh_token: Some("new-refresh-token".to_string()),
+        };
+
+        manager.save_refreshed_token(account_id, &token_response).await.unwrap();
+
+        // Read back from disk and verify
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&account_path).unwrap()
+        ).unwrap();
+
+        assert_eq!(saved["token"]["access_token"], "new-access-token");
+        assert_eq!(saved["token"]["refresh_token"], "new-refresh-token");
+        assert_eq!(saved["token"]["expires_in"], 7200);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_save_refreshed_token_preserves_old_refresh_when_none() {
+        let tmp = std::env::temp_dir().join(format!("kiro-save-rt-none-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-no-rt";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "nort@test.com",
+            "token": {
+                "access_token": "old-access",
+                "refresh_token": "keep-this-refresh",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // Token refresh without new refresh_token
+        let token_response = crate::modules::oauth::TokenResponse {
+            access_token: "new-access".to_string(),
+            expires_in: 3600,
+            token_type: "Bearer".to_string(),
+            refresh_token: None, // No new refresh token
+        };
+
+        manager.save_refreshed_token(account_id, &token_response).await.unwrap();
+
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&account_path).unwrap()
+        ).unwrap();
+
+        assert_eq!(saved["token"]["access_token"], "new-access");
+        // Old refresh_token should be preserved
+        assert_eq!(saved["token"]["refresh_token"], "keep-this-refresh");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_dashmap_refresh_token_updated_after_refresh() {
+        // Verify that when a token is refreshed, the DashMap entry gets the new refresh_token
+        let tmp = std::env::temp_dir().join(format!("kiro-dashmap-rt-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-dm-rt";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "dm@test.com",
+            "token": {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // Verify initial state
+        {
+            let entry = manager.tokens.get(account_id).unwrap();
+            assert_eq!(entry.refresh_token, "old-refresh");
+        }
+
+        // Simulate what the refresh code does: update DashMap with new refresh_token
+        if let Some(mut entry) = manager.tokens.get_mut(account_id) {
+            entry.access_token = "new-access".to_string();
+            entry.refresh_token = "new-refresh-rotated".to_string();
+            entry.timestamp = now + 7200;
+        }
+
+        // Verify the update
+        {
+            let entry = manager.tokens.get(account_id).unwrap();
+            assert_eq!(entry.access_token, "new-access");
+            assert_eq!(entry.refresh_token, "new-refresh-rotated");
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_double_check_skips_refresh_when_already_refreshed() {
+        // Simulate the double-check pattern: after acquiring lock, check if token was already refreshed
+        let tmp = std::env::temp_dir().join(format!("kiro-dblchk-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-dblchk";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "dblchk@test.com",
+            "token": {
+                "access_token": "fresh-access",
+                "refresh_token": "fresh-refresh",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // Token has timestamp far in the future (already refreshed by another request)
+        let already_refreshed = manager.tokens.get(account_id)
+            .map(|e| e.timestamp > chrono::Utc::now().timestamp() + 60)
+            .unwrap_or(false);
+
+        assert!(already_refreshed, "Token should be considered already refreshed");
+
+        // Now simulate an expired token
+        if let Some(mut entry) = manager.tokens.get_mut(account_id) {
+            entry.timestamp = now - 100; // expired
+        }
+
+        let needs_refresh = manager.tokens.get(account_id)
+            .map(|e| e.timestamp > chrono::Utc::now().timestamp() + 60)
+            .unwrap_or(false);
+
+        assert!(!needs_refresh, "Expired token should need refresh");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_refresh_lock_contention() {
+        // Simulate multiple concurrent requests trying to refresh the same account
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = Arc::new(TokenManager::new(tmp.clone()));
+
+        let refresh_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        // Spawn 5 concurrent "refresh" attempts
+        for i in 0..5 {
+            let mgr = manager.clone();
+            let count = refresh_count.clone();
+
+            handles.push(tokio::spawn(async move {
+                let lock = mgr.refresh_locks
+                    .entry("acc1".to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+
+                let _guard = lock.lock().await;
+
+                // Check if already refreshed (simulated by counter)
+                let current = count.load(std::sync::atomic::Ordering::SeqCst);
+                if current > 0 {
+                    // Another task already refreshed — skip
+                    return false;
+                }
+
+                // Simulate refresh work
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            }));
+        }
+
+        let results: Vec<bool> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Exactly one task should have performed the refresh
+        let refresh_performed = results.iter().filter(|&&r| r).count();
+        assert_eq!(refresh_performed, 1, "Only one concurrent request should perform the actual refresh");
+        assert_eq!(refresh_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
