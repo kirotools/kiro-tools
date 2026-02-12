@@ -31,14 +31,14 @@ do_build() {
     echo ">>> 构建完成"
 }
 
-find_pid() {
-    lsof -ti:"$PORT" 2>/dev/null || true
+find_pids() {
+    lsof -ti:"$PORT" 2>/dev/null | tr '\n' ' ' | xargs
 }
 
 do_start() {
-    PID=$(find_pid)
-    if [ -n "$PID" ]; then
-        echo "服务已在运行 (PID: $PID, 端口: $PORT)"
+    PIDS=$(find_pids)
+    if [ -n "$PIDS" ]; then
+        echo "服务已在运行 (PID: $PIDS, 端口: $PORT)"
         return 0
     fi
 
@@ -51,9 +51,9 @@ do_start() {
     KIRO_DIST_PATH="$DIST" nohup "$BIN" > kiro-tools.log 2>&1 &
     sleep 1
 
-    PID=$(find_pid)
-    if [ -n "$PID" ]; then
-        echo "启动成功 (PID: $PID, 端口: $PORT)"
+    PIDS=$(find_pids)
+    if [ -n "$PIDS" ]; then
+        echo "启动成功 (PID: $PIDS, 端口: $PORT)"
         echo "日志: tail -f kiro-tools.log"
     else
         echo "启动失败，请检查日志: cat kiro-tools.log"
@@ -62,27 +62,27 @@ do_start() {
 }
 
 do_stop() {
-    PID=$(find_pid)
-    if [ -z "$PID" ]; then
+    PIDS=$(find_pids)
+    if [ -z "$PIDS" ]; then
         echo "服务未运行"
         return 0
     fi
-    echo ">>> 停止服务 (PID: $PID)..."
-    kill "$PID"
+    echo ">>> 停止服务 (PID: $PIDS)..."
+    kill $PIDS 2>/dev/null || true
     sleep 1
     # 确认已停止
-    PID=$(find_pid)
-    if [ -n "$PID" ]; then
+    PIDS=$(find_pids)
+    if [ -n "$PIDS" ]; then
         echo "强制终止..."
-        kill -9 "$PID"
+        kill -9 $PIDS 2>/dev/null || true
     fi
     echo "已停止"
 }
 
 do_status() {
-    PID=$(find_pid)
-    if [ -n "$PID" ]; then
-        echo "运行中 (PID: $PID, 端口: $PORT)"
+    PIDS=$(find_pids)
+    if [ -n "$PIDS" ]; then
+        echo "运行中 (PID: $PIDS, 端口: $PORT)"
     else
         echo "未运行"
     fi
