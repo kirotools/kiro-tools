@@ -26,21 +26,20 @@ ABV_DIST_PATH=./dist \
 ./target/release/kiro-tools
 ```
 
-## 停止服务
-
-手动运行时：
+## 一键脚本
 
 ```bash
-# 查找进程并停止
-pkill -f kiro-tools
-
-# 或通过端口查找
-lsof -ti:8045 | xargs kill
+./start.sh start    # 构建(如需)并启动
+./start.sh stop     # 停止
+./start.sh restart  # 重启
+./start.sh status   # 查看状态
+./start.sh build    # 仅构建
 ```
 
 Deb 安装时使用 systemctl：
 
 ```bash
+sudo systemctl start kiro-tools
 sudo systemctl stop kiro-tools
 sudo systemctl restart kiro-tools
 ```
