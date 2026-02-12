@@ -267,14 +267,19 @@ pub async fn ensure_fresh_token(
     ));
     let response = refresh_access_token(Some(&current_token.refresh_token), None, account_id).await?;
 
+    // Use new refresh_token if returned, otherwise keep the old one
+    let new_refresh_token = response.refresh_token
+        .clone()
+        .unwrap_or_else(|| current_token.refresh_token.clone());
+
     // Construct new TokenData
     Ok(crate::models::TokenData::new(
         response.access_token,
-        current_token.refresh_token.clone(), // refresh_token may not be returned on refresh
+        new_refresh_token,
         response.expires_in,
         current_token.email.clone(),
-        current_token.project_id.clone(), // Keep original project_id
-        None, // session_id will be generated in token_manager
+        current_token.project_id.clone(),
+        None,
     ))
 }
 

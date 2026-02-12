@@ -839,7 +839,7 @@ pub async fn handle_kiro_messages(
     request: &ClaudeRequest,
     access_token: &str,
     email: &str,
-    _account_id: &str,
+    account_id: &str,
     trace_id: &str,
     region: &str,
 ) -> Response {
@@ -861,64 +861,195 @@ pub async fn handle_kiro_messages(
         serde_json::to_string(&kiro_payload).unwrap_or_default()
     );
 
-    // 2. Build headers
-    let headers = get_kiro_headers(access_token, &fingerprint);
+    // 2. Send request with retry logic (403 → refresh + retry, 429/5xx → exponential backoff)
+    const MAX_RETRIES: usize = 3;
+    const BASE_DELAY_MS: u64 = 1000;
 
-    // 3. Send request to Kiro API
     let client = reqwest::Client::new();
-    let resp = match client
-        .post(&url)
-        .headers(headers)
-        .json(&kiro_payload)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            error!("[{}] [Kiro] Request failed: {}", trace_id, e);
+    let mut current_token = access_token.to_string();
+
+    let resp = 'retry: {
+        for attempt in 0..MAX_RETRIES {
+            let headers = get_kiro_headers(&current_token, &fingerprint);
+
+            let send_result = client
+                .post(&url)
+                .headers(headers)
+                .json(&kiro_payload)
+                .send()
+                .await;
+
+            let response = match send_result {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt < MAX_RETRIES - 1 {
+                        let delay = BASE_DELAY_MS * (1 << attempt);
+                        warn!("[{}] [Kiro] Request error (attempt {}/{}): {}, retrying in {}ms",
+                            trace_id, attempt + 1, MAX_RETRIES, e, delay);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    error!("[{}] [Kiro] Request failed after {} attempts: {}", trace_id, MAX_RETRIES, e);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        axum::Json(json!({
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": format!("Kiro upstream request failed: {}", e)
+                            }
+                        })),
+                    ).into_response();
+                }
+            };
+
+            let status = response.status();
+
+            if status.is_success() {
+                break 'retry response;
+            }
+
+            // 403 — token expired/invalid, force refresh and retry
+            if status.as_u16() == 403 {
+                let error_text = response.text().await.unwrap_or_default();
+                warn!("[{}] [Kiro] Received 403 (attempt {}/{}): {}, refreshing token...",
+                    trace_id, attempt + 1, MAX_RETRIES, error_text);
+
+                if attempt < MAX_RETRIES - 1 {
+                    match crate::modules::oauth::refresh_access_token(
+                        None, None, Some(account_id)
+                    ).await {
+                        Ok(token_response) => {
+                            current_token = token_response.access_token;
+                            info!("[{}] [Kiro] Token refreshed after 403, retrying...", trace_id);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("[{}] [Kiro] Token refresh failed after 403: {}", trace_id, e);
+                        }
+                    }
+                }
+
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("Kiro API 403 (token invalid): {}", error_text)
+                        }
+                    })),
+                ).into_response();
+            }
+
+            // 401 — bad credentials, force refresh and retry
+            if status.as_u16() == 401 {
+                let error_text = response.text().await.unwrap_or_default();
+                warn!("[{}] [Kiro] Received 401 (attempt {}/{}): {}, refreshing token...",
+                    trace_id, attempt + 1, MAX_RETRIES, error_text);
+
+                if attempt < MAX_RETRIES - 1 {
+                    match crate::modules::oauth::refresh_access_token(
+                        None, None, Some(account_id)
+                    ).await {
+                        Ok(token_response) => {
+                            current_token = token_response.access_token;
+                            info!("[{}] [Kiro] Token refreshed after 401, retrying...", trace_id);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("[{}] [Kiro] Token refresh failed after 401: {}", trace_id, e);
+                        }
+                    }
+                }
+
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("Kiro API 401 (bad credentials): {}", error_text)
+                        }
+                    })),
+                ).into_response();
+            }
+
+            // 429 — rate limited, exponential backoff
+            if status.as_u16() == 429 {
+                let error_text = response.text().await.unwrap_or_default();
+                if attempt < MAX_RETRIES - 1 {
+                    let delay = BASE_DELAY_MS * (1 << attempt);
+                    warn!("[{}] [Kiro] Received 429 (attempt {}/{}), waiting {}ms...",
+                        trace_id, attempt + 1, MAX_RETRIES, delay);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(json!({
+                        "type": "error",
+                        "error": {
+                            "type": "rate_limit_error",
+                            "message": format!("Kiro API rate limited: {}", error_text)
+                        }
+                    })),
+                ).into_response();
+            }
+
+            // 5xx — server error, exponential backoff
+            if status.as_u16() >= 500 {
+                let error_text = response.text().await.unwrap_or_default();
+                if attempt < MAX_RETRIES - 1 {
+                    let delay = BASE_DELAY_MS * (1 << attempt);
+                    warn!("[{}] [Kiro] Received {} (attempt {}/{}), waiting {}ms...",
+                        trace_id, status.as_u16(), attempt + 1, MAX_RETRIES, delay);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    axum::Json(json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("Kiro API error ({}): {}", status.as_u16(), error_text)
+                        }
+                    })),
+                ).into_response();
+            }
+
+            // Other errors — return immediately
+            let error_text = response.text().await.unwrap_or_default();
+            error!("[{}] [Kiro] Upstream error {}: {}", trace_id, status.as_u16(), error_text);
+            let mapped_status = match status.as_u16() {
+                400 => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            };
             return (
-                StatusCode::BAD_GATEWAY,
+                mapped_status,
                 axum::Json(json!({
                     "type": "error",
                     "error": {
                         "type": "api_error",
-                        "message": format!("Kiro upstream request failed: {}", e)
+                        "message": format!("Kiro API error ({}): {}", status.as_u16(), error_text)
                     }
                 })),
-            )
-                .into_response();
+            ).into_response();
         }
-    };
 
-    let status = resp.status();
-    if !status.is_success() {
-        let error_text = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status));
-        error!(
-            "[{}] [Kiro] Upstream error {}: {}",
-            trace_id,
-            status.as_u16(),
-            error_text
-        );
-
-        let mapped_status = match status.as_u16() {
-            429 => StatusCode::TOO_MANY_REQUESTS,
-            400 => StatusCode::BAD_REQUEST,
-            401 | 403 => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::BAD_GATEWAY,
-        };
-
+        // Should not reach here, but just in case
         return (
-            mapped_status,
+            StatusCode::BAD_GATEWAY,
             axum::Json(json!({
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": format!("Kiro API error ({}): {}", status.as_u16(), error_text)
+                    "message": "Kiro upstream request failed after all retries"
                 }
             })),
-        )
-            .into_response();
-    }
+        ).into_response();
+    };
 
     // 4. Stream the response — parse AWS event stream and convert to Anthropic SSE
     let model = request.model.clone();
