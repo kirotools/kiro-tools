@@ -1016,9 +1016,9 @@ const CLAUDE_CORRECTION_FACTOR: f64 = 1.15;
 const TOOL_DESCRIPTION_MAX_LENGTH: usize = 10000;
 
 /// First-token timeout: how long to wait for the first chunk before retrying
-const FIRST_TOKEN_TIMEOUT_SECS: u64 = 15;
+const FIRST_TOKEN_TIMEOUT_SECS: u64 = 120;
 /// Maximum number of transparent retries on first-token timeout
-const FIRST_TOKEN_MAX_RETRIES: u32 = 3;
+const FIRST_TOKEN_MAX_RETRIES: u32 = 1;
 
 fn estimate_tokens(text: &str) -> u32 {
     if text.is_empty() {

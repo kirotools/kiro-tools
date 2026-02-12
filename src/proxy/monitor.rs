@@ -76,20 +76,6 @@ impl ProxyMonitor {
     }
 
     pub async fn log_request(&self, log: ProxyRequestLog) {
-        if let (Some(account), Some(input), Some(output)) = (
-            &log.account_email,
-            log.input_tokens,
-            log.output_tokens,
-        ) {
-            let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
-            let account = account.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output) {
-                    tracing::debug!("Failed to record token stats: {}", e);
-                }
-            });
-        }
-
         if !self.is_enabled() {
             return;
         }
