@@ -2,7 +2,7 @@ export interface Account {
     id: string;
     email: string;
     name?: string;
-    token: TokenData;
+    token?: TokenData;
     quota?: QuotaData;
     disabled?: boolean;
     disabled_reason?: string;
@@ -10,10 +10,14 @@ export interface Account {
     proxy_disabled?: boolean;
     proxy_disabled_reason?: string;
     proxy_disabled_at?: number;
-    protected_models?: string[];
     custom_label?: string;
-    created_at: number;
+    created_at?: number;
     last_used: number;
+    is_current?: boolean;
+    validation_blocked?: boolean;
+    validation_blocked_until?: number;
+    validation_blocked_reason?: string;
+    concurrency?: ConcurrencyData;
 }
 
 export interface TokenData {
@@ -40,3 +44,27 @@ export interface ModelQuota {
     current_usage?: number;
 }
 
+export interface ConcurrencyData {
+    max: number;
+    current: number;
+    available: number;
+}
+
+export interface ProxyAccount {
+    id: string;
+    email: string;
+    name?: string;
+    is_current?: boolean;
+    disabled?: boolean;
+    disabled_reason?: string;
+    disabled_at?: number;
+    proxy_disabled?: boolean;
+    proxy_disabled_reason?: string;
+    proxy_disabled_at?: number;
+    validation_blocked?: boolean;
+    validation_blocked_until?: number;
+    validation_blocked_reason?: string;
+    quota?: QuotaData;
+    last_used: number;
+    concurrency?: ConcurrencyData;
+}

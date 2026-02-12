@@ -1,21 +1,18 @@
 
-import { Lock } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
 import { cn } from '../../utils/cn';
 import { getQuotaColor } from '../../utils/format';
 
 interface QuotaItemProps {
     label: string;
     percentage: number;
-    isProtected?: boolean;
     className?: string;
     Icon?: React.ComponentType<{ size?: number; className?: string }>;
     usageLimit?: number;
     currentUsage?: number;
 }
 
-export function QuotaItem({ label, percentage, isProtected, className, Icon, usageLimit, currentUsage }: QuotaItemProps) {
-    const { t } = useTranslation();
+export function QuotaItem({ label, percentage, className, Icon, usageLimit, currentUsage }: QuotaItemProps) {
+
     const getBgColorClass = (p: number) => {
         const color = getQuotaColor(p);
         switch (color) {
@@ -60,9 +57,6 @@ export function QuotaItem({ label, percentage, isProtected, className, Icon, usa
 
                 {/* Percentage + Absolute */}
                 <span className={cn("text-right font-bold transition-colors flex items-center justify-end gap-0.5 shrink-0", getTextColorClass(percentage))}>
-                    {isProtected && (
-                        <span title={t('accounts.quota_protected')}><Lock className="w-2.5 h-2.5 text-amber-500" /></span>
-                    )}
                     {usageLimit != null && currentUsage != null
                         ? `${Math.round(usageLimit - currentUsage)}/${Math.round(usageLimit)}`
                         : `${percentage}%`

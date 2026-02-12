@@ -113,7 +113,11 @@ const TokenStats: React.FC = () => {
                     break;
             }
 
-            setChartData(data);
+            setChartData(Array.isArray(data) ? data : []);
+
+            // Ensure trend data is always arrays
+            if (!Array.isArray(modelTrend)) modelTrend = [];
+            if (!Array.isArray(accountTrend)) accountTrend = [];
 
             const models = new Set<string>();
             modelTrend.forEach(point => {
@@ -154,8 +158,8 @@ const TokenStats: React.FC = () => {
                 invoke<TokenStatsSummary>('get_token_stats_summary', { hours })
             ]);
 
-            setAccountData(accounts);
-            setModelData(models_stats);
+            setAccountData(Array.isArray(accounts) ? accounts : []);
+            setModelData(Array.isArray(models_stats) ? models_stats : []);
             setSummary(summaryData);
         } catch (error) {
             console.error('Failed to fetch token stats:', error);

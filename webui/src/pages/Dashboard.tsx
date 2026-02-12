@@ -6,7 +6,7 @@ import AddAccountDialog from '../components/accounts/AddAccountDialog';
 import { showToast } from '../components/common/ToastContainer';
 import BestAccounts from '../components/dashboard/BestAccounts';
 import CurrentAccount from '../components/dashboard/CurrentAccount';
-import { exportAccounts } from '../services/accountService';
+import { exportAccounts, type AddAccountParams } from '../services/accountService';
 import { useAccountStore } from '../stores/useAccountStore';
 import { Account } from '../types/account';
 
@@ -70,8 +70,8 @@ function Dashboard() {
         }
     };
 
-    const handleAddAccount = async (email: string, refreshToken: string) => {
-        await addAccount(email, refreshToken);
+    const handleAddAccount = async (params: AddAccountParams) => {
+        await addAccount(params);
         await fetchAccounts(); // 刷新列表
     };
 

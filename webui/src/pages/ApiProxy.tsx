@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../utils/request';
-import { isTauri } from '../utils/env';
+
 import { copyToClipboard } from '../utils/clipboard';
 import {
     Power,
@@ -908,7 +908,7 @@ export default function ApiProxy() {
                         </div>
                         <div className="p-3 space-y-3">
                             {/* 监听端口、超时和自启动 */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                                 <div>
                                     <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
                                         <span className="inline-flex items-center gap-1">
@@ -931,6 +931,34 @@ export default function ApiProxy() {
                                     />
                                     <p className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
                                         {t('proxy.config.port_hint')}
+                                    </p>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                        <span className="inline-flex items-center gap-1">
+                                            {t('proxy.config.max_concurrency')}
+                                            <HelpTooltip
+                                                text={t('proxy.config.max_concurrency_tooltip')}
+                                                ariaLabel={t('proxy.config.max_concurrency')}
+                                                placement="top"
+                                            />
+                                        </span>
+                                    </label>
+                                    <input
+                                        type="number"
+                                        value={appConfig.proxy.max_concurrency_per_account || 1}
+                                        onChange={(e) => {
+                                            const val = parseInt(e.target.value);
+                                            if (!isNaN(val) && val >= 1) {
+                                                updateProxyConfig({ max_concurrency_per_account: val });
+                                            }
+                                        }}
+                                        min={1}
+                                        max={100}
+                                        className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-base-200 rounded-lg bg-white dark:bg-base-200 text-xs text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    />
+                                    <p className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+                                        {t('proxy.config.max_concurrency_hint')}
                                     </p>
                                 </div>
                                 <div>
@@ -1566,8 +1594,7 @@ export default function ApiProxy() {
                                 </div>
                             </CollapsibleCard>
 
-                            {/* 公网访问 (Cloudflared) - 仅在桌面端显示 */}
-                            {isTauri() && (
+                            {/* 公网访问 (Cloudflared) */}
                                 <CollapsibleCard
                                     title={t('proxy.cloudflared.title', { defaultValue: 'Public Access (Cloudflared)' })}
                                     icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-orange-500"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>}
@@ -1728,7 +1755,6 @@ export default function ApiProxy() {
                                         )}
                                     </div>
                                 </CollapsibleCard>
-                            )}
                         </div>
                     )
                 }

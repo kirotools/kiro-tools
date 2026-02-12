@@ -86,8 +86,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_data_dir_path': { url: '/api/system/data-dir', method: 'GET' },
   'get_update_settings': { url: '/api/system/updates/settings', method: 'GET' },
   'save_update_settings': { url: '/api/system/updates/save', method: 'POST' },
-  'is_auto_launch_enabled': { url: '/api/system/autostart/status', method: 'GET' },
-  'toggle_auto_launch': { url: '/api/system/autostart/toggle', method: 'POST' },
   'get_http_api_settings': { url: '/api/system/http-api/settings', method: 'GET' },
   'save_http_api_settings': { url: '/api/system/http-api/settings', method: 'POST' },
 
@@ -181,11 +179,9 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
     },
   };
 
-  if ((mapping.method === 'GET' || mapping.method === 'DELETE') && args) {
+  if ((mapping.method === 'GET' || mapping.method === 'DELETE') && bodyArgs) {
     const params = new URLSearchParams();
-    Object.entries(args).forEach(([key, value]) => {
-      // [FIX] 跳过已用于路径替换的参数
-      if (url.includes(encodeURIComponent(String(value)))) return;
+    Object.entries(bodyArgs).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         params.append(key, String(value));
       }
@@ -211,17 +207,21 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
         }
       }
       const errorData = await response.json().catch(() => ({}));
-      throw errorData.error || `HTTP Error ${response.status}`;
+      const err = errorData.error;
+      const errMsg = typeof err === 'object' && err !== null
+        ? (typeof err.message === 'string' ? err.message : JSON.stringify(err))
+        : (typeof err === 'string' ? err : undefined);
+      throw errMsg || `HTTP Error ${response.status}`;
     }
 
-    // 如果是 204 No Content，直接返回 null
+    // 如果是 204 No Content，返回空数组（保持与期望类型一致）
     if (response.status === 204) {
-      return null as unknown as T;
+      return [] as unknown as T;
     }
 
     const text = await response.text();
-    if (!text) {
-      return null as unknown as T;
+    if (!text || text.trim() === '') {
+      return [] as unknown as T;
     }
 
     try {
@@ -232,6 +232,7 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
     }
   } catch (error) {
     console.error(`Web Fetch Error [${cmd}]:`, error);
-    throw error;
+    const msg = error instanceof Error ? error.message : (typeof error === 'string' ? error : String(error));
+    throw msg;
   }
 }

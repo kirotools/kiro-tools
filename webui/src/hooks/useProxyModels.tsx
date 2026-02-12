@@ -47,8 +47,13 @@ export const useProxyModels = () => {
             try {
                 const resp = await invoke<{ models: ModelFromApi[] }>('list_proxy_models');
                 if (cancelled) return;
+                const modelList = resp?.models;
+                if (!Array.isArray(modelList)) {
+                    console.warn('list_proxy_models returned unexpected format:', resp);
+                    return;
+                }
                 setModels(
-                    resp.models.map((m) => ({
+                    modelList.map((m) => ({
                         id: m.id,
                         name: m.name,
                         desc: getModelDesc(m, t),

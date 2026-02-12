@@ -3,7 +3,6 @@ import { Link } from 'react-router-dom';
 import { ChevronDown, MoreVertical, Sun, Moon, LogOut, Minimize2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { NavItem, Language } from './constants';
-import { isTauri } from '../../utils/env';
 import { useViewStore } from '../../stores/useViewStore';
 
 // useClickOutside Hook
@@ -260,19 +259,15 @@ export function MoreDropdown({
                         </button>
                     ))}
 
-                    {/* 登出按钮 - 仅 Web 模式显示 */}
-                    {!isTauri() && (
-                        <>
-                            <div className="my-1 border-t border-gray-100 dark:border-base-100"></div>
-                            <button
-                                onClick={handleLogout}
-                                className="w-full px-4 py-2.5 text-left text-sm flex items-center gap-3 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-600 dark:text-red-400"
-                            >
-                                <LogOut className="w-4 h-4" />
-                                <span>{t('nav.logout', '登出')}</span>
-                            </button>
-                        </>
-                    )}
+                    {/* 登出按钮 */}
+                    <div className="my-1 border-t border-gray-100 dark:border-base-100"></div>
+                    <button
+                        onClick={handleLogout}
+                        className="w-full px-4 py-2.5 text-left text-sm flex items-center gap-3 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-600 dark:text-red-400"
+                    >
+                        <LogOut className="w-4 h-4" />
+                        <span>{t('nav.logout', '登出')}</span>
+                    </button>
                 </div>
             )}
         </div>

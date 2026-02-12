@@ -112,11 +112,6 @@ interface AccountRowContentProps {
 // 模型分组配置
 // ============================================================================
 
-function isModelProtected(protectedModels: string[] | undefined, modelName: string): boolean {
-    if (!protectedModels || protectedModels.length === 0) return false;
-    return protectedModels.includes(modelName.toLowerCase());
-}
-
 // ============================================================================
 // 子组件
 // ============================================================================
@@ -225,7 +220,7 @@ function AccountRowContent({
     onUpdateLabel,
 }: AccountRowContentProps) {
     const { t } = useTranslation();
-    const { config, showAllQuotas } = useConfigStore();
+    const { showAllQuotas } = useConfigStore();
 
     // 自定义标签编辑状态
     const [isEditingLabel, setIsEditingLabel] = useState(false);
@@ -251,14 +246,6 @@ function AccountRowContent({
         }
     };
 
-    // 使用统一的模型配置
-
-    // 获取要显示的模型列表（兜底：如果 pinned 里全是旧 ID 则回退到全部）
-    const rawPinned = config?.pinned_quota_models?.models || [];
-    const validPinned = rawPinned.filter(modelId => MODEL_CONFIG[modelId]);
-    const pinnedModels = validPinned.length > 0 ? validPinned : Object.keys(MODEL_CONFIG);
-
-    // 根据 show_all 状态决定显示哪些模型
     const displayModels = sortModels(
         showAllQuotas
             ? (account.quota?.models || []).map(m => {
@@ -266,16 +253,14 @@ function AccountRowContent({
                 return {
                     id: m.name.toLowerCase(),
                     label: config?.shortLabel || config?.label || m.name,
-                    protectedKey: config?.protectedKey || m.name.toLowerCase(),
                     data: m
                 };
             })
-            : pinnedModels.filter(modelId => MODEL_CONFIG[modelId]).map(modelId => {
+            : Object.keys(MODEL_CONFIG).filter(modelId => MODEL_CONFIG[modelId]).map(modelId => {
                 const config = MODEL_CONFIG[modelId];
                 return {
                     id: modelId,
                     label: config.shortLabel || config.label,
-                    protectedKey: config.protectedKey,
                     data: account.quota?.models.find(m => m.name.toLowerCase() === modelId)
                 };
             })
@@ -421,7 +406,6 @@ function AccountRowContent({
                                     key={model.id}
                                     label={model.label}
                                     percentage={modelData?.percentage || 0}
-                                    isProtected={isModelProtected(account.protected_models, model.protectedKey)}
                                     Icon={MODEL_CONFIG[model.id]?.Icon}
                                     usageLimit={modelData?.usage_limit}
                                     currentUsage={modelData?.current_usage}

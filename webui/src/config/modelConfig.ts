@@ -1,29 +1,16 @@
 import { Claude } from '@lobehub/icons';
 
-/**
- * 模型配置接口
- */
 export interface ModelConfig {
-    /** 模型完整显示名称 (用于详情) */
     label: string;
-    /** 模型简短标签 (用于列表/卡片) */
     shortLabel: string;
-    /** 保护模型的键名 */
-    protectedKey: string;
-    /** 模型图标组件 */
     Icon: React.ComponentType<{ size?: number; className?: string }>;
 }
 
-/**
- * 模型配置映射
- * 键为模型 ID，值为模型配置
- */
 export const MODEL_CONFIG: Record<string, ModelConfig> = {
     'kiro-credit': {
         label: 'Kiro Credits',
         shortLabel: 'Credits',
-        protectedKey: 'kiro-credit',
-        Icon: Claude.Color,  // reuse existing icon for now
+        Icon: Claude.Color,
     },
 };
 

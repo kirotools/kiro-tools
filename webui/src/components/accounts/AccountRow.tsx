@@ -99,6 +99,22 @@ function AccountRow({ account, selected, onSelect, isCurrent, isRefreshing, isSw
                             </span>
                         )}
 
+                        {account.concurrency && (
+                            <span
+                                className={cn(
+                                    "px-2 py-0.5 rounded-md text-[10px] font-bold flex items-center gap-1 shadow-sm border",
+                                    account.concurrency.current >= account.concurrency.max
+                                        ? "bg-rose-100 dark:bg-rose-900/50 text-rose-700 dark:text-rose-300 border-rose-200/50"
+                                        : account.concurrency.current > 0
+                                            ? "bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 border-amber-200/50"
+                                            : "bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 border-emerald-200/50"
+                                )}
+                                title={`${account.concurrency.current}/${account.concurrency.max} concurrent requests`}
+                            >
+                                <span className="font-mono">{account.concurrency.current}/{account.concurrency.max}</span>
+                            </span>
+                        )}
+
                         {/* 订阅类型徽章 */}
                         {account.quota?.subscription_tier && (() => {
                             const tier = account.quota.subscription_tier.toLowerCase();
@@ -154,7 +170,6 @@ function AccountRow({ account, selected, onSelect, isCurrent, isRefreshing, isSw
                             )}
                             <div className="relative z-10 w-full flex items-center text-[10px] font-mono leading-none">
                                 <span className="w-[64px] text-gray-500 dark:text-gray-400 font-bold pr-1 flex items-center gap-1" title="Kiro Credits">
-                                    {account.protected_models?.includes('kiro-credit') && <Lock className="w-2.5 h-2.5 text-rose-500 shrink-0 z-10" />}
                                     <span className="truncate">Credits</span>
                                 </span>
                                 <div className="flex-1" />

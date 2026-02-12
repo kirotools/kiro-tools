@@ -27,7 +27,6 @@ interface AccountCardProps {
 const DEFAULT_MODELS = Object.entries(MODEL_CONFIG).map(([id, config]) => ({
     id,
     label: config.label,
-    protectedKey: config.protectedKey,
     Icon: config.Icon
 }));
 
@@ -64,19 +63,13 @@ function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, is
     };
 
     const displayModels = useMemo(() => {
-        // Build map of friendly labels and icons from DEFAULT_MODELS
         const iconMap = new Map(DEFAULT_MODELS.map(m => [m.id, m.Icon]));
 
-        // Get all models from account (source of truth)
         const accountModels = account.quota?.models?.map(m => {
-            // 注意：DEFAULT_MODELS 现在应该包含 shortLabel，我们需要确保它被正确映射
-            // 但 DEFAULT_MODELS 是从 MODEL_CONFIG 生成的，我们需要确保它包含 shortLabel
-            // 这里为了安全，直接从 MODEL_CONFIG 获取
             const fullConfig = MODEL_CONFIG[m.name.toLowerCase()];
             return {
                 id: m.name,
                 label: fullConfig?.shortLabel || fullConfig?.label || m.name,
-                protectedKey: fullConfig?.protectedKey,
                 Icon: iconMap.get(m.name),
                 data: m
             };
@@ -87,24 +80,11 @@ function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, is
         if (showAllQuotas) {
             models = accountModels;
         } else {
-            // Filter for pinned or defaults
-            const pinned = config?.pinned_quota_models?.models;
-            if (pinned && pinned.length > 0) {
-                models = accountModels.filter(m => pinned.includes(m.id));
-            } else {
-                // Default fallback: show known default models
-                models = accountModels.filter(m => DEFAULT_MODELS.some(d => d.id === m.id));
-            }
+            models = accountModels.filter(m => DEFAULT_MODELS.some(d => d.id === m.id));
         }
 
-        // 应用排序
         return sortModels(models);
     }, [config, account, showAllQuotas]);
-
-    const isModelProtected = (key?: string) => {
-        if (!key) return false;
-        return account.protected_models?.includes(key);
-    };
 
     return (
         <div className={cn(
@@ -224,7 +204,6 @@ function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, is
                                 key={model.id}
                                 label={model.label}
                                 percentage={model.data?.percentage || 0}
-                                isProtected={isModelProtected(model.protectedKey)}
                                 Icon={model.Icon}
                             />
                         ))}

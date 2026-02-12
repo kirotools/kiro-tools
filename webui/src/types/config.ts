@@ -23,6 +23,7 @@ export interface ProxyConfig {
     thinking_budget?: ThinkingBudgetConfig;
     global_system_prompt?: GlobalSystemPromptConfig;
     proxy_pool?: ProxyPoolConfig;
+    max_concurrency_per_account?: number;
 }
 
 // ============================================================================
@@ -65,16 +66,6 @@ export interface StickySessionConfig {
 }
 
 
-export interface QuotaProtectionConfig {
-    enabled: boolean;
-    threshold_percentage: number; // 1-99
-    monitored_models: string[];
-}
-
-export interface PinnedQuotaModelsConfig {
-    models: string[];
-}
-
 export interface ExperimentalConfig {
     enable_usage_scaling: boolean;
     context_compression_threshold_l1?: number;
@@ -95,14 +86,11 @@ export interface AppConfig {
     auto_sync: boolean;
     sync_interval: number;
     default_export_path?: string;
-    auto_launch?: boolean; // 开机自动启动
     auto_check_update?: boolean; // 自动检查更新
     update_check_interval?: number; // 更新检查间隔（小时）
     accounts_page_size?: number; // 账号列表每页显示数量,默认 0 表示自动计算
     hidden_menu_items?: string[]; // 隐藏的菜单项路径列表
-    quota_protection: QuotaProtectionConfig; // [NEW] 配额保护配置
-    pinned_quota_models: PinnedQuotaModelsConfig; // [NEW] 配额关注列表
-    circuit_breaker: CircuitBreakerConfig; // [NEW] 熔断器配置
+    circuit_breaker: CircuitBreakerConfig;
     proxy: ProxyConfig;
 }
 

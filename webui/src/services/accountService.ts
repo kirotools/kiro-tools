@@ -15,8 +15,14 @@ export async function getCurrentAccount(): Promise<Account | null> {
     return await invoke('get_current_account');
 }
 
-export async function addAccount(email: string, refreshToken: string): Promise<Account> {
-    return await invoke('add_account', { email, refreshToken });
+export interface AddAccountParams {
+    refreshToken?: string;
+    credsFile?: string;
+    sqliteDb?: string;
+}
+
+export async function addAccount(params: AddAccountParams): Promise<Account> {
+    return await invoke('add_account', params);
 }
 
 export async function deleteAccount(accountId: string): Promise<void> {

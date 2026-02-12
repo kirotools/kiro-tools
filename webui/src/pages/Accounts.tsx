@@ -19,7 +19,7 @@ import AddAccountDialog from "../components/accounts/AddAccountDialog";
 import ModalDialog from "../components/common/ModalDialog";
 import Pagination from "../components/common/Pagination";
 import { showToast } from "../components/common/ToastContainer";
-import { exportAccounts } from "../services/accountService";
+import { exportAccounts, type AddAccountParams } from "../services/accountService";
 import { useAccountStore } from "../stores/useAccountStore";
 import { useConfigStore } from "../stores/useConfigStore";
 import { Account } from "../types/account";
@@ -261,8 +261,8 @@ function Accounts() {
     setSelectedIds(newSet);
   };
 
-  const handleAddAccount = async (email: string, refreshToken: string) => {
-    await addAccount(email, refreshToken);
+  const handleAddAccount = async (params: AddAccountParams) => {
+    await addAccount(params);
   };
 
   const [switchingAccountId, setSwitchingAccountId] = useState<string | null>(
@@ -558,7 +558,7 @@ function Accounts() {
 
     for (const entry of validEntries) {
       try {
-        await addAccount(entry.email || "", entry.refresh_token!);
+        await addAccount({ refreshToken: entry.refresh_token! });
         successCount++;
       } catch (error) {
         console.error("Import account failed:", error);

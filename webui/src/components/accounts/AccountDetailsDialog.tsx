@@ -16,9 +16,6 @@ export default function AccountDetailsDialog({ account, onClose }: AccountDetail
 
     return createPortal(
         <div className="modal modal-open z-[100]">
-            {/* Draggable Top Region */}
-            <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-[110]" />
-
             <div className="modal-box relative max-w-3xl bg-white dark:bg-base-100 shadow-2xl rounded-2xl p-0 overflow-hidden">
                 {/* Header */}
                 <div className="px-6 py-5 border-b border-gray-100 dark:border-base-200 bg-gray-50/50 dark:bg-base-200/50 flex justify-between items-center">
@@ -74,23 +71,6 @@ export default function AccountDetailsDialog({ account, onClose }: AccountDetail
 
                 {/* Content */}
                 <div className="p-6 max-h-[60vh] overflow-y-auto">
-                    {/* Protected Models Section */}
-                    {account.protected_models && account.protected_models.length > 0 && (
-                        <div className="mb-6">
-                            <h4 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                <AlertCircle size={12} className="text-amber-500" />
-                                {t('accounts.details.protected_models')}
-                            </h4>
-                            <div className="flex flex-wrap gap-2">
-                                {account.protected_models.map(model => (
-                                    <span key={model} className="px-2 py-1 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 text-[11px] font-mono border border-amber-100 dark:border-amber-900/40 rounded-md">
-                                        {model}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
                     <h4 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mb-3">{t('accounts.details.model_quota')}</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {sortModels(
