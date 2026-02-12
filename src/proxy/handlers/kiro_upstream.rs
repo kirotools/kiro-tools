@@ -830,6 +830,9 @@ impl AnthropicSseBuilder {
             &json!({"type": "message_stop"}),
         ));
 
+        // OpenAI-compatible [DONE] marker for broader client compatibility
+        out.push_str("data: [DONE]\n\n");
+
         out
     }
 }
