@@ -26,6 +26,16 @@ ABV_DIST_PATH=./dist \
 ./target/release/kiro-tools
 ```
 
+## 停止服务
+
+```bash
+# 查找进程并停止
+pkill -f kiro-tools
+
+# 或通过端口查找
+lsof -ti:8045 | xargs kill
+```
+
 ## Docker
 
 ```bash
