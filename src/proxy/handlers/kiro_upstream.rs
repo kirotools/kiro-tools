@@ -558,6 +558,30 @@ fn normalize_message_roles(messages: &mut [(String, String, Vec<Value>, Vec<Valu
     }
 }
 
+/// Inject fake reasoning tags into content (matching gateway behavior).
+/// This injects <thinking_mode>enabled</thinking_mode> tags into the user message
+/// to enable extended thinking on Kiro without using native thinkingConfig.
+fn inject_thinking_tags(content: &str, max_tokens: u32) -> String {
+    let thinking_instruction = "Think in English for better reasoning quality.\n\n\
+Your thinking process should be thorough and systematic:\n\
+- First, make sure you fully understand what is being asked\n\
+- Consider multiple approaches or perspectives when relevant\n\
+- Think about edge cases, potential issues, and what could go wrong\n\
+- Challenge your initial assumptions\n\
+- Verify your reasoning before reaching a conclusion\n\n\
+After completing your thinking, respond in the same language the user is using in their messages.\n\n\
+Take the time you need. Quality of thought matters more than speed.";
+
+    let thinking_prefix = format!(
+        "<thinking_mode>enabled</thinking_mode>\n\
+<max_thinking_length>{}</max_thinking_length>\n\
+<thinking_instruction>{}</thinking_instruction>\n\n",
+        max_tokens, thinking_instruction
+    );
+
+    format!("{}{}", thinking_prefix, content)
+}
+
 /// Convert Anthropic ClaudeRequest to Kiro generateAssistantResponse payload
 fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -> Value {
     let model_id = normalize_model_name(&request.model);
@@ -683,8 +707,15 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
     let (_, current_text, _current_tool_uses, current_tool_results, current_images) = last;
     let current_content = if current_text.is_empty() {
         "Continue".to_string()
+    } else if let Some(thinking) = &request.thinking {
+        if thinking.type_ == "enabled" || thinking.budget_tokens.is_some() {
+            let max_tokens = thinking.budget_tokens.unwrap_or(4000);
+            inject_thinking_tags(&current_text, max_tokens)
+        } else {
+            current_text.clone()
+        }
     } else {
-        current_text
+        current_text.clone()
     };
 
     let mut user_input_message = json!({
