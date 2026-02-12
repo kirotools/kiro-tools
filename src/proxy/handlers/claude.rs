@@ -198,6 +198,7 @@ pub async fn handle_messages(
             &region,
             profile_arn.as_deref(),
             _concurrency_slot,
+            &token_manager,
         )
         .await;
     }

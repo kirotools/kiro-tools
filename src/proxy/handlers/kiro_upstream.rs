@@ -1299,6 +1299,7 @@ pub async fn handle_kiro_messages(
     region: &str,
     profile_arn: Option<&str>,
     concurrency_slot: ConcurrencySlot,
+    token_manager: &crate::proxy::token_manager::TokenManager,
 ) -> Response {
     let fingerprint = get_machine_fingerprint();
     let kiro_host = get_kiro_q_host(region);
@@ -1374,7 +1375,8 @@ pub async fn handle_kiro_messages(
                         None, None, Some(account_id)
                     ).await {
                         Ok(token_response) => {
-                            current_token = token_response.access_token;
+                            current_token = token_response.access_token.clone();
+                            let _ = token_manager.sync_refreshed_token(account_id, &token_response).await;
                             info!("[{}] [Kiro] Token refreshed after 403, retrying...", trace_id);
                             continue;
                         }
@@ -1402,7 +1404,8 @@ pub async fn handle_kiro_messages(
                         None, None, Some(account_id)
                     ).await {
                         Ok(token_response) => {
-                            current_token = token_response.access_token;
+                            current_token = token_response.access_token.clone();
+                            let _ = token_manager.sync_refreshed_token(account_id, &token_response).await;
                             info!("[{}] [Kiro] Token refreshed after 401, retrying...", trace_id);
                             continue;
                         }

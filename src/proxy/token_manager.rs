@@ -1408,6 +1408,19 @@ impl TokenManager {
         Ok(())
     }
 
+    /// 保存刷新后的 token 到内存 + 磁盘
+    pub async fn sync_refreshed_token(&self, account_id: &str, token_response: &crate::modules::oauth::TokenResponse) -> Result<(), String> {
+        if let Some(mut entry) = self.tokens.get_mut(account_id) {
+            entry.access_token = token_response.access_token.clone();
+            entry.expires_in = token_response.expires_in;
+            entry.timestamp = chrono::Utc::now().timestamp() + token_response.expires_in;
+            if let Some(ref new_rt) = token_response.refresh_token {
+                entry.refresh_token = new_rt.clone();
+            }
+        }
+        self.save_refreshed_token(account_id, token_response).await
+    }
+
     /// 保存刷新后的 token 到账号文件
     async fn save_refreshed_token(&self, account_id: &str, token_response: &crate::modules::oauth::TokenResponse) -> Result<(), String> {
         let entry = self.tokens.get(account_id)
