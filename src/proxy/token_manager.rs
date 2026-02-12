@@ -61,6 +61,7 @@ pub struct ProxyToken {
     pub validation_blocked: bool,          // [NEW] Check for validation block (VALIDATION_REQUIRED temporary block)
     pub validation_blocked_until: i64,     // [NEW] Timestamp until which the account is blocked
     pub model_quotas: HashMap<String, i32>, // [OPTIMIZATION] In-memory cache for model-specific quotas
+    pub profile_arn: Option<String>,
 }
 
 pub struct TokenManager {
@@ -531,6 +532,7 @@ impl TokenManager {
             validation_blocked: account.get("validation_blocked").and_then(|v| v.as_bool()).unwrap_or(false),
             validation_blocked_until: account.get("validation_blocked_until").and_then(|v| v.as_i64()).unwrap_or(0),
             model_quotas,
+            profile_arn: account.get("profileArn").and_then(|v| v.as_str()).map(|s| s.to_string()),
         }))
     }
 
@@ -1462,6 +1464,10 @@ impl TokenManager {
             .and_then(|r| r.as_str())
             .map(|s| s.to_string())
             .or_else(|| Some("us-east-1".to_string()))
+    }
+
+    pub fn get_account_profile_arn(&self, account_id: &str) -> Option<String> {
+        self.tokens.get(account_id)?.profile_arn.clone()
     }
 
     /// 通过 email 获取指定账号的 Token（用于预热等需要指定账号的场景）
@@ -2546,6 +2552,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             model_quotas: HashMap::new(),
+            profile_arn: None,
         }
     }
 
