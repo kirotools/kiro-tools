@@ -28,12 +28,21 @@ ABV_DIST_PATH=./dist \
 
 ## 停止服务
 
+手动运行时：
+
 ```bash
 # 查找进程并停止
 pkill -f kiro-tools
 
 # 或通过端口查找
 lsof -ti:8045 | xargs kill
+```
+
+Deb 安装时使用 systemctl：
+
+```bash
+sudo systemctl stop kiro-tools
+sudo systemctl restart kiro-tools
 ```
 
 ## Deb 安装
