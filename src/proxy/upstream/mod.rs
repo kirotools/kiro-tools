@@ -3,3 +3,8 @@
 
 pub mod models;
 pub mod retry;
+pub mod utils;
+pub mod thinking_parser;
+pub mod truncation;
+pub mod parsers;
+pub mod model_cache;
