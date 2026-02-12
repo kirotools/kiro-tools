@@ -37,7 +37,7 @@ jobs:
           mkdir -p release/kiro-tools-linux-amd64
           cp target/release/kiro-tools release/kiro-tools-linux-amd64/
           cp -r webui/dist release/kiro-tools-linux-amd64/dist
-          cp README.md LICENSE Dockerfile release/kiro-tools-linux-amd64/
+          cp README.md LICENSE Dockerfile start.sh release/kiro-tools-linux-amd64/
           cd release && tar czf kiro-tools-linux-amd64.tar.gz kiro-tools-linux-amd64
 
       - name: Package deb
@@ -211,7 +211,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path release/kiro-tools-windows-amd64
           Copy-Item target/release/kiro-tools.exe release/kiro-tools-windows-amd64/
           Copy-Item -Recurse webui/dist release/kiro-tools-windows-amd64/dist
-          Copy-Item README.md, LICENSE release/kiro-tools-windows-amd64/
+          Copy-Item README.md, LICENSE, start.ps1 release/kiro-tools-windows-amd64/
           Compress-Archive -Path release/kiro-tools-windows-amd64 -DestinationPath release/kiro-tools-windows-amd64.zip
 
       - name: Upload zip
