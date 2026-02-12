@@ -335,21 +335,24 @@ pub async fn monitor_middleware(
                             }
                         }
                         
-                        // Token usage extraction
+                        // Token usage extraction — only update fields that are present
                         if let Some(usage) = json.get("usage")
                             .or(json.get("usageMetadata"))
                             .or(json.get("response").and_then(|r| r.get("usage")))
                         {
-                            log.input_tokens = usage.get("prompt_tokens")
+                            let new_input = usage.get("prompt_tokens")
                                 .or(usage.get("input_tokens"))
                                 .or(usage.get("promptTokenCount"))
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as u32);
-                            log.output_tokens = usage.get("completion_tokens")
+                            let new_output = usage.get("completion_tokens")
                                 .or(usage.get("output_tokens"))
                                 .or(usage.get("candidatesTokenCount"))
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as u32);
+                            
+                            if let Some(v) = new_input { log.input_tokens = Some(v); }
+                            if let Some(v) = new_output { log.output_tokens = Some(v); }
                             
                             if log.input_tokens.is_none() && log.output_tokens.is_none() {
                                 log.output_tokens = usage.get("total_tokens")
