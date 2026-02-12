@@ -134,13 +134,20 @@ struct AccountResponse {
     proxy_disabled: bool,
     proxy_disabled_reason: Option<String>,
     proxy_disabled_at: Option<i64>,
-    protected_models: Vec<String>,
     /// [NEW] 403 验证阻止状态
     validation_blocked: bool,
     validation_blocked_until: Option<i64>,
     validation_blocked_reason: Option<String>,
     quota: Option<QuotaResponse>,
     last_used: i64,
+    concurrency: Option<ConcurrencyResponse>,
+}
+
+#[derive(Serialize)]
+struct ConcurrencyResponse {
+    max: usize,
+    current: usize,
+    available: usize,
 }
 
 #[derive(Serialize)]
@@ -171,7 +178,10 @@ struct AccountListResponse {
 fn to_account_response(
     account: &crate::models::account::Account,
     current_id: &Option<String>,
+    token_manager: &TokenManager,
 ) -> AccountResponse {
+    let concurrency_info = token_manager.get_account_concurrency_info(&account.id);
+    
     AccountResponse {
         id: account.id.clone(),
         email: account.email.clone(),
@@ -183,7 +193,6 @@ fn to_account_response(
         proxy_disabled: account.proxy_disabled,
         proxy_disabled_reason: account.proxy_disabled_reason.clone(),
         proxy_disabled_at: account.proxy_disabled_at,
-        protected_models: account.protected_models.iter().cloned().collect(),
         quota: account.quota.as_ref().map(|q| QuotaResponse {
             models: q
                 .models
@@ -204,6 +213,11 @@ fn to_account_response(
         validation_blocked: account.validation_blocked,
         validation_blocked_until: account.validation_blocked_until,
         validation_blocked_reason: account.validation_blocked_reason.clone(),
+        concurrency: Some(ConcurrencyResponse {
+            max: concurrency_info.max_concurrency,
+            current: concurrency_info.current_concurrency,
+            available: concurrency_info.available_slots,
+        }),
     }
 }
 
@@ -448,43 +462,16 @@ impl AxumServer {
                 "/stats/token/account-trend/daily",
                 get(admin_get_token_stats_account_trend_daily),
             )
-            .route("/accounts/bulk-delete", post(admin_delete_accounts))
-            .route("/accounts/export", post(admin_export_accounts))
-            .route("/accounts/reorder", post(admin_reorder_accounts))
-            .route("/accounts/:accountId/quota", get(admin_fetch_account_quota))
-            .route(
-                "/accounts/:accountId/toggle-proxy",
-                post(admin_toggle_proxy_status),
-            )
-            .route("/system/data-dir", get(admin_get_data_dir_path))
-            .route("/system/updates/settings", get(admin_get_update_settings))
-            .route(
-                "/system/updates/check-status",
-                get(admin_should_check_updates),
-            )
-            .route("/system/updates/check", post(admin_check_for_updates))
-            .route("/system/updates/touch", post(admin_update_last_check_time))
-            .route("/system/updates/save", post(admin_save_update_settings))
-            .route(
-                "/system/autostart/status",
-                get(admin_is_auto_launch_enabled),
-            )
-            .route("/system/autostart/toggle", post(admin_toggle_auto_launch))
-            .route(
-                "/system/http-api/settings",
-                get(admin_get_http_api_settings).post(admin_save_http_api_settings),
-            )
-            .route("/system/cache/clear", post(admin_clear_kiro_cache))
-            .route(
-                "/system/cache/paths",
-                get(admin_get_kiro_cache_paths),
-            )
-            .route("/system/logs/clear-cache", post(admin_clear_log_cache))
-            // Security / IP Monitoring
+            // User Tokens
+            .route("/user-tokens", get(admin_list_user_tokens).post(admin_create_user_token))
+            .route("/user-tokens/summary", get(admin_get_user_token_summary))
+            .route("/user-tokens/:id/renew", post(admin_renew_user_token))
+            .route("/user-tokens/:id", delete(admin_delete_user_token).patch(admin_update_user_token))
+            // Security / IP Management
             .route("/security/logs", get(admin_get_ip_access_logs))
             .route("/security/logs/clear", post(admin_clear_ip_access_logs))
             .route("/security/stats", get(admin_get_ip_stats))
-            .route("/security/token-stats", get(admin_get_ip_token_stats)) // For IP Token usage
+            .route("/security/token-stats", get(admin_get_ip_token_stats))
             .route("/security/blacklist", get(admin_get_ip_blacklist).post(admin_add_ip_to_blacklist).delete(admin_remove_ip_from_blacklist))
             .route("/security/blacklist/clear", post(admin_clear_ip_blacklist))
             .route("/security/blacklist/check", get(admin_check_ip_in_blacklist))
@@ -492,15 +479,26 @@ impl AxumServer {
             .route("/security/whitelist/clear", post(admin_clear_ip_whitelist))
             .route("/security/whitelist/check", get(admin_check_ip_in_whitelist))
             .route("/security/config", get(admin_get_security_config).post(admin_update_security_config))
-            // User Tokens
-            .route("/user-tokens", get(admin_list_user_tokens).post(admin_create_user_token))
-            .route("/user-tokens/summary", get(admin_get_user_token_summary))
-            .route("/user-tokens/:id/renew", post(admin_renew_user_token))
-            .route("/user-tokens/:id", delete(admin_delete_user_token).patch(admin_update_user_token))
-            // 应用管理特定鉴权层 (强制校验)
+            // Additional Account Routes
+            .route("/accounts/bulk-delete", post(admin_delete_accounts))
+            .route("/accounts/reorder", post(admin_reorder_accounts))
+            .route("/accounts/export", post(admin_export_accounts))
+            .route("/accounts/:accountId/toggle-proxy", post(admin_toggle_proxy_status))
+            .route("/accounts/:accountId/quota", get(admin_fetch_account_quota))
+            // System
+            .route("/system/data-dir", get(admin_get_data_dir_path))
+            .route("/system/updates/settings", get(admin_get_update_settings))
+            .route("/system/updates/save", post(admin_save_update_settings))
+            .route("/system/updates/check-status", get(admin_should_check_updates))
+            .route("/system/updates/check", post(admin_check_for_updates))
+            .route("/system/updates/touch", post(admin_update_last_check_time))
+            .route("/system/http-api/settings", get(admin_get_http_api_settings).post(admin_save_http_api_settings))
+            .route("/system/cache/clear", post(admin_clear_kiro_cache))
+            .route("/system/cache/paths", get(admin_get_kiro_cache_paths))
+            .route("/system/logs/clear-cache", post(admin_clear_log_cache))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
-                admin_auth_middleware,
+                crate::proxy::middleware::auth::admin_auth_middleware,
             ));
 
         // 3. 整合并应用全局层
@@ -655,42 +653,7 @@ async fn admin_list_accounts(
     let account_responses: Vec<AccountResponse> = accounts
         .into_iter()
         .map(|acc| {
-            let is_current = current_id.as_ref().map(|id| id == &acc.id).unwrap_or(false);
-            let quota = acc.quota.map(|q| QuotaResponse {
-                models: q
-                    .models
-                    .into_iter()
-                    .map(|m| ModelQuota {
-                        name: m.name,
-                        percentage: m.percentage,
-                        reset_time: m.reset_time,
-                        usage_limit: m.usage_limit,
-                        current_usage: m.current_usage,
-                    })
-                    .collect(),
-                last_updated: q.last_updated,
-                subscription_tier: q.subscription_tier,
-                is_forbidden: q.is_forbidden,
-            });
-
-            AccountResponse {
-                id: acc.id,
-                email: acc.email,
-                name: acc.name,
-                is_current,
-                disabled: acc.disabled,
-                disabled_reason: acc.disabled_reason,
-                disabled_at: acc.disabled_at,
-                proxy_disabled: acc.proxy_disabled,
-                proxy_disabled_reason: acc.proxy_disabled_reason,
-                proxy_disabled_at: acc.proxy_disabled_at,
-                protected_models: acc.protected_models.into_iter().collect(),
-                validation_blocked: acc.validation_blocked,
-                validation_blocked_until: acc.validation_blocked_until,
-                validation_blocked_reason: acc.validation_blocked_reason,
-                quota,
-                last_used: acc.last_used,
-            }
+            to_account_response(&acc, &current_id, &state.token_manager)
         })
         .collect();
 
@@ -734,41 +697,7 @@ async fn admin_get_current_account(
     let response = if let Some(id) = current_id {
         let acc = account::load_account(&id).ok();
         acc.map(|acc| {
-            let quota = acc.quota.map(|q| QuotaResponse {
-                models: q
-                    .models
-                    .into_iter()
-                    .map(|m| ModelQuota {
-                        name: m.name,
-                        percentage: m.percentage,
-                        reset_time: m.reset_time,
-                        usage_limit: m.usage_limit,
-                        current_usage: m.current_usage,
-                    })
-                    .collect(),
-                last_updated: q.last_updated,
-                subscription_tier: q.subscription_tier,
-                is_forbidden: q.is_forbidden,
-            });
-
-            AccountResponse {
-                id: acc.id,
-                email: acc.email,
-                name: acc.name,
-                is_current: true,
-                disabled: acc.disabled,
-                disabled_reason: acc.disabled_reason,
-                disabled_at: acc.disabled_at,
-                proxy_disabled: acc.proxy_disabled,
-                proxy_disabled_reason: acc.proxy_disabled_reason,
-                proxy_disabled_at: acc.proxy_disabled_at,
-                protected_models: acc.protected_models.into_iter().collect(),
-                validation_blocked: acc.validation_blocked,
-                validation_blocked_until: acc.validation_blocked_until,
-                validation_blocked_reason: acc.validation_blocked_reason,
-                quota,
-                last_used: acc.last_used,
-            }
+            to_account_response(&acc, &Some(id), &state.token_manager)
         })
     } else {
         None
@@ -782,6 +711,7 @@ async fn admin_get_current_account(
 struct AddAccountRequest {
     refresh_token: Option<String>,
     creds_file: Option<String>,
+    sqlite_db: Option<String>,
 }
 
 async fn admin_add_account(
@@ -790,7 +720,11 @@ async fn admin_add_account(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let account = state
         .account_service
-        .add_account(payload.refresh_token.as_deref(), payload.creds_file.as_deref())
+        .add_account(
+            payload.refresh_token.as_deref(),
+            payload.creds_file.as_deref(),
+            payload.sqlite_db.as_deref(),
+        )
         .await
         .map_err(|e| {
             (
@@ -813,7 +747,7 @@ async fn admin_add_account(
             Json(ErrorResponse { error: e }),
         )
     })?;
-    Ok(Json(to_account_response(&account, &current_id)))
+    Ok(Json(to_account_response(&account, &current_id, &state.token_manager)))
 }
 
 async fn admin_delete_account(
@@ -1016,6 +950,8 @@ async fn admin_save_config(
         let mut pool = state.proxy_pool_state.write().await;
         *pool = new_config.clone().proxy.proxy_pool;
     }
+
+    state.token_manager.set_max_concurrency(new_config.proxy.max_concurrency_per_account);
 
     Ok(StatusCode::OK)
 }
