@@ -647,6 +647,7 @@ fn parse_events_from_buffer(buffer: &[u8]) -> (Vec<KiroEvent>, usize) {
 
 
 /// Classify a parsed JSON value into a KiroEvent
+
 fn classify_kiro_event(val: Value) -> KiroEvent {
     // Check for stop signal
     if val.get("stop").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -676,7 +677,15 @@ fn classify_kiro_event(val: Value) -> KiroEvent {
         return KiroEvent::ContextUsage(pct);
     }
 
-    // Check for tool use start (has name + toolUseId)
+    // Check for tool input delta BEFORE tool use start.
+    // Kiro API sends tool input deltas with "input" field, and they may also carry
+    // "name" and "toolUseId". We must check for "input" first to avoid misclassifying
+    // input deltas as tool use starts.
+    if let Some(input) = val.get("input").and_then(|v| v.as_str()) {
+        return KiroEvent::ToolInputDelta(input.to_string());
+    }
+
+    // Check for tool use start (has name + toolUseId, but NO "input" field)
     if let (Some(name), Some(tool_use_id)) = (
         val.get("name").and_then(|v| v.as_str()),
         val.get("toolUseId").and_then(|v| v.as_str()),
@@ -687,13 +696,6 @@ fn classify_kiro_event(val: Value) -> KiroEvent {
         };
     }
 
-    // Check for tool input delta (has "input" as string, no "name")
-    if val.get("name").is_none() {
-        if let Some(input) = val.get("input").and_then(|v| v.as_str()) {
-            return KiroEvent::ToolInputDelta(input.to_string());
-        }
-    }
-
     // Check for text content delta
     if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
         return KiroEvent::TextDelta(content.to_string());
@@ -701,6 +703,7 @@ fn classify_kiro_event(val: Value) -> KiroEvent {
 
     KiroEvent::Unknown(val)
 }
+
 
 // ===== Token Estimation =====
 // Approximate token counting using char/4 heuristic with Claude correction factor.
@@ -752,6 +755,16 @@ fn estimate_request_tokens(request: &ClaudeRequest) -> u32 {
 }
 
 // ===== Kiro Events → Anthropic SSE Conversion =====
+// Matches Python kiro-gateway's streaming_anthropic.py behavior:
+// - Tool calls are accumulated in the parser layer and emitted as complete blocks
+// - stop_reason is "tool_use" when tool calls are present, "end_turn" otherwise
+
+/// Accumulated tool call from Kiro stream events
+struct PendingToolCall {
+    name: String,
+    tool_use_id: String,
+    input_buffer: String,
+}
 
 /// State machine for converting Kiro events to Anthropic SSE
 struct AnthropicSseBuilder {
@@ -759,12 +772,15 @@ struct AnthropicSseBuilder {
     model: String,
     content_index: usize,
     in_text_block: bool,
-    in_tool_block: bool,
     total_input_tokens: u32,
     total_output_tokens: u32,
     estimated_input_tokens: u32,
     output_char_count: usize,
     has_sent_message_start: bool,
+    // Tool call accumulation (matches gateway's AwsEventStreamParser behavior)
+    current_tool: Option<PendingToolCall>,
+    completed_tools: Vec<PendingToolCall>,
+    has_tool_calls: bool,
 }
 
 impl AnthropicSseBuilder {
@@ -774,12 +790,14 @@ impl AnthropicSseBuilder {
             model: model.to_string(),
             content_index: 0,
             in_text_block: false,
-            in_tool_block: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
             estimated_input_tokens,
             output_char_count: 0,
             has_sent_message_start: false,
+            current_tool: None,
+            completed_tools: Vec::new(),
+            has_tool_calls: false,
         }
     }
 
@@ -813,16 +831,76 @@ impl AnthropicSseBuilder {
         )
     }
 
-    fn close_current_block(&mut self) -> String {
+    fn close_text_block(&mut self) -> String {
         let mut out = String::new();
-        if self.in_text_block || self.in_tool_block {
+        if self.in_text_block {
             out.push_str(&Self::format_sse(
                 "content_block_stop",
                 &json!({"type": "content_block_stop", "index": self.content_index}),
             ));
             self.content_index += 1;
             self.in_text_block = false;
-            self.in_tool_block = false;
+        }
+        out
+    }
+
+    /// Finalize current tool call and move to completed list
+    fn finalize_current_tool(&mut self) {
+        if let Some(tool) = self.current_tool.take() {
+            self.completed_tools.push(tool);
+        }
+    }
+
+    /// Emit all completed tool calls as Anthropic SSE blocks.
+    /// Called during finalize() after the stream ends, matching gateway behavior
+    /// where tool calls are emitted after all stream events are processed.
+    fn emit_tool_blocks(&mut self) -> String {
+        let mut out = String::new();
+        let tools: Vec<PendingToolCall> = self.completed_tools.drain(..).collect();
+        if !tools.is_empty() {
+            self.has_tool_calls = true;
+        }
+        for tool in tools {
+            // Parse accumulated input JSON, fall back to empty object
+            let input_obj: Value = if tool.input_buffer.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&tool.input_buffer).unwrap_or(json!({}))
+            };
+
+            // content_block_start
+            out.push_str(&Self::format_sse(
+                "content_block_start",
+                &json!({
+                    "type": "content_block_start",
+                    "index": self.content_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": tool.tool_use_id,
+                        "name": tool.name,
+                        "input": {}
+                    }
+                }),
+            ));
+
+            // input_json_delta with complete input
+            let input_json_str = serde_json::to_string(&input_obj).unwrap_or_else(|_| "{}".to_string());
+            out.push_str(&Self::format_sse(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": self.content_index,
+                    "delta": {"type": "input_json_delta", "partial_json": input_json_str}
+                }),
+            ));
+
+            // content_block_stop
+            out.push_str(&Self::format_sse(
+                "content_block_stop",
+                &json!({"type": "content_block_stop", "index": self.content_index}),
+            ));
+
+            self.content_index += 1;
         }
         out
     }
@@ -835,10 +913,6 @@ impl AnthropicSseBuilder {
 
         match event {
             KiroEvent::TextDelta(text) => {
-                if self.in_tool_block {
-                    out.push_str(&self.close_current_block());
-                }
-
                 if !self.in_text_block {
                     out.push_str(&Self::format_sse(
                         "content_block_start",
@@ -864,40 +938,30 @@ impl AnthropicSseBuilder {
             }
 
             KiroEvent::ToolUseStart { name, tool_use_id } => {
-                // Close any open block
-                out.push_str(&self.close_current_block());
+                // Close text block if open (text comes before tools)
+                out.push_str(&self.close_text_block());
 
-                out.push_str(&Self::format_sse(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": self.content_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": tool_use_id,
-                            "name": name,
-                            "input": {}
-                        }
-                    }),
-                ));
-                self.in_tool_block = true;
+                // Finalize any previous tool call
+                self.finalize_current_tool();
+
+                // Start accumulating new tool call
+                self.current_tool = Some(PendingToolCall {
+                    name,
+                    tool_use_id,
+                    input_buffer: String::new(),
+                });
             }
 
             KiroEvent::ToolInputDelta(partial_json) => {
-                if self.in_tool_block {
-                    out.push_str(&Self::format_sse(
-                        "content_block_delta",
-                        &json!({
-                            "type": "content_block_delta",
-                            "index": self.content_index,
-                            "delta": {"type": "input_json_delta", "partial_json": partial_json}
-                        }),
-                    ));
+                // Append to current tool's input buffer
+                if let Some(ref mut tool) = self.current_tool {
+                    tool.input_buffer.push_str(&partial_json);
                 }
             }
 
             KiroEvent::ToolUseStop => {
-                out.push_str(&self.close_current_block());
+                // Finalize current tool call
+                self.finalize_current_tool();
             }
 
             KiroEvent::Usage {
@@ -923,7 +987,15 @@ impl AnthropicSseBuilder {
     fn finalize(&mut self) -> String {
         let mut out = String::new();
 
-        out.push_str(&self.close_current_block());
+        // Close text block if still open
+        out.push_str(&self.close_text_block());
+
+        // Finalize any in-progress tool call
+        self.finalize_current_tool();
+
+        // Emit all accumulated tool calls as complete blocks
+        // (matches gateway: tools are emitted after stream ends)
+        out.push_str(&self.emit_tool_blocks());
 
         let input_tokens = if self.total_input_tokens > 0 {
             self.total_input_tokens
@@ -939,12 +1011,15 @@ impl AnthropicSseBuilder {
         self.total_input_tokens = input_tokens;
         self.total_output_tokens = output_tokens;
 
+        // stop_reason: "tool_use" if tool calls were present, "end_turn" otherwise
+        let stop_reason = if self.has_tool_calls { "tool_use" } else { "end_turn" };
+
         out.push_str(&Self::format_sse(
             "message_delta",
             &json!({
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "stop_sequence": null
                 },
                 "usage": {
@@ -1214,6 +1289,7 @@ pub async fn handle_kiro_messages(
 
                         // Parse events from accumulated buffer
                         let (events, consumed) = parse_events_from_buffer(&buffer);
+
                         // Only drain the consumed portion — preserve incomplete JSON at tail
                         if consumed > 0 {
                             let _ = buffer.split_to(consumed);
