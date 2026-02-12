@@ -15,6 +15,13 @@ pub mod session_manager;
 pub mod sticky_config;
 pub mod upstream;
 
+// Gateway migration modules
+pub mod errors;
+pub mod debug_logger;
+pub mod http_client;
+pub mod tokenizer;
+pub mod model_resolver;
+
 pub use config::update_global_system_prompt_config;
 pub use config::update_thinking_budget_config;
 pub use config::ProxyAuthMode;

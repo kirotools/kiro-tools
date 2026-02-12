@@ -324,7 +324,7 @@ impl AxumServer {
         // 构建路由 - 使用新架构的 handlers！
         use crate::proxy::handlers;
         use crate::proxy::middleware::{
-            admin_auth_middleware, auth_middleware, cors_layer, ip_filter_middleware,
+            auth_middleware, cors_layer, ip_filter_middleware,
             monitor_middleware, service_status_middleware,
         };
 
@@ -1722,17 +1722,6 @@ async fn admin_save_update_settings(Json(settings): Json<serde_json::Value>) -> 
     } else {
         StatusCode::BAD_REQUEST
     }
-}
-
-async fn admin_is_auto_launch_enabled() -> impl IntoResponse {
-    // Note: Autostart requires tauri::AppHandle, which is not available in Axum State easily.
-    // For now, return false in Web mode.
-    Json(false)
-}
-
-async fn admin_toggle_auto_launch(Json(_payload): Json<serde_json::Value>) -> impl IntoResponse {
-    // Note: Autostart requires tauri::AppHandle.
-    StatusCode::NOT_IMPLEMENTED
 }
 
 async fn admin_get_http_api_settings() -> impl IntoResponse {
