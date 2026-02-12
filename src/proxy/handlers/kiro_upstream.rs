@@ -471,72 +471,180 @@ enum KiroEvent {
 ///
 /// Returns (events, consumed_bytes) — caller should drain consumed_bytes from the buffer
 /// to preserve any incomplete JSON fragment at the tail for the next chunk.
+
 fn parse_events_from_buffer(buffer: &[u8]) -> (Vec<KiroEvent>, usize) {
+    // AWS event stream is a binary framing protocol. The raw bytes contain binary frame
+    // headers/trailers with embedded JSON payloads. We cannot naively scan for '{' because
+    // binary frame bytes may contain random '{' / '}' that confuse brace-matching.
+    //
+    // Strategy (matching Python kiro-gateway's AwsEventStreamParser):
+    // 1. Strip non-UTF8 bytes (equivalent to Python's decode('utf-8', errors='ignore'))
+    // 2. Search for known JSON pattern prefixes only
+    // 3. Use brace-matching to extract complete JSON objects
+    // 4. Track byte positions in the ORIGINAL buffer for correct draining
+
+    // Known JSON event patterns from Kiro API (same as Python reference)
+    const PATTERNS: &[&str] = &[
+        "{\"content\":",
+        "{\"name\":",
+        "{\"input\":",
+        "{\"stop\":",
+        "{\"followupPrompt\":",
+        "{\"usage\":",
+        "{\"contextUsagePercentage\":",
+    ];
+
     let mut events = Vec::new();
-    let text = String::from_utf8_lossy(buffer);
 
-    // We work with chars for correct JSON parsing, but need to track byte positions
-    // for the caller to drain the buffer correctly.
-    let mut char_idx = 0;
-    let mut byte_offset = 0; // tracks byte position corresponding to char_idx
-    let mut last_consumed_byte = 0;
-    let chars: Vec<char> = text.chars().collect();
+    // Build a "clean" UTF-8 string by skipping invalid bytes, while maintaining
+    // a mapping from clean-string char index back to original buffer byte position.
+    // This is equivalent to Python's `chunk.decode('utf-8', errors='ignore')`.
+    let mut clean = String::new();
+    let mut byte_map: Vec<usize> = Vec::new(); // byte_map[i] = original buffer position of clean[i]-th byte
 
-    // Pre-compute byte lengths for each char
-    let char_byte_lens: Vec<usize> = chars.iter().map(|c| c.len_utf8()).collect();
-
-    while char_idx < chars.len() {
-        if chars[char_idx] == '{' {
-            let mut depth = 0;
-            let mut in_string = false;
-            let mut escape_next = false;
-            let start = char_idx;
-            let mut found = false;
-
-            for j in char_idx..chars.len() {
-                if escape_next {
-                    escape_next = false;
-                    continue;
+    let mut i = 0;
+    while i < buffer.len() {
+        // Try to decode a valid UTF-8 character starting at position i
+        let remaining = &buffer[i..];
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                // All remaining bytes are valid UTF-8
+                for byte in valid.bytes() {
+                    byte_map.push(i);
+                    i += 1;
                 }
-                match chars[j] {
-                    '\\' if in_string => escape_next = true,
-                    '"' => in_string = !in_string,
-                    '{' if !in_string => depth += 1,
-                    '}' if !in_string => {
-                        depth -= 1;
-                        if depth == 0 {
-                            let json_str: String = chars[start..=j].iter().collect();
-                            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
-                                events.push(classify_kiro_event(val));
-                            }
-                            // Advance byte_offset to after this JSON object
-                            let bytes_consumed: usize = char_byte_lens[char_idx..=j].iter().sum();
-                            byte_offset += bytes_consumed;
-                            char_idx = j + 1;
-                            last_consumed_byte = byte_offset;
-                            found = true;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if !found {
-                // Incomplete JSON at end of buffer — stop here, preserve from current position
+                clean.push_str(valid);
                 break;
             }
-        } else {
-            byte_offset += char_byte_lens[char_idx];
-            char_idx += 1;
-            last_consumed_byte = byte_offset;
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to > 0 {
+                    let valid_str = unsafe { std::str::from_utf8_unchecked(&remaining[..valid_up_to]) };
+                    for _ in 0..valid_up_to {
+                        byte_map.push(i);
+                        i += 1;
+                    }
+                    clean.push_str(valid_str);
+                }
+                // Skip the invalid byte(s)
+                match e.error_len() {
+                    Some(len) => i += len,
+                    None => break, // Incomplete sequence at end
+                }
+            }
         }
     }
 
-    // Clamp to buffer length as safety measure (from_utf8_lossy can expand invalid bytes)
-    let consumed = last_consumed_byte.min(buffer.len());
+    // Now search for known patterns in the clean string and extract JSON objects
+    let mut search_pos = 0;
+    let mut last_consumed_original_pos = 0;
 
+    while search_pos < clean.len() {
+        // Find the earliest known pattern
+        let mut earliest_pos: Option<usize> = None;
+
+        for pattern in PATTERNS {
+            if let Some(pos) = clean[search_pos..].find(pattern) {
+                let abs_pos = search_pos + pos;
+                match earliest_pos {
+                    None => earliest_pos = Some(abs_pos),
+                    Some(ep) if abs_pos < ep => earliest_pos = Some(abs_pos),
+                    _ => {}
+                }
+            }
+        }
+
+        let json_start = match earliest_pos {
+            Some(pos) => pos,
+            None => break, // No more patterns found
+        };
+
+        // Brace-match from json_start to find complete JSON object
+        let chars: Vec<char> = clean[json_start..].chars().collect();
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut json_end_char_offset: Option<usize> = None;
+
+        for (ci, &ch) in chars.iter().enumerate() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        json_end_char_offset = Some(ci);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match json_end_char_offset {
+            Some(end_offset) => {
+                // Collect the JSON string
+                let json_str: String = chars[..=end_offset].iter().collect();
+                let json_byte_len_in_clean = json_str.len(); // byte length in clean string
+
+                if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                    events.push(classify_kiro_event(val));
+                }
+
+                // Advance past this JSON in the clean string
+                let end_clean_byte_pos = json_start + json_byte_len_in_clean;
+                search_pos = end_clean_byte_pos;
+
+                // Map back to original buffer position for draining
+                if end_clean_byte_pos < byte_map.len() {
+                    // The original byte position right after the last byte of this JSON
+                    last_consumed_original_pos = byte_map[end_clean_byte_pos - 1] + 1;
+                } else if !byte_map.is_empty() {
+                    // We consumed up to the end of the clean string
+                    last_consumed_original_pos = byte_map[byte_map.len() - 1] + 1;
+                }
+            }
+            None => {
+                // Incomplete JSON — stop here, preserve from current position
+                break;
+            }
+        }
+    }
+
+    // If no events were found but we scanned past non-JSON binary data,
+    // still advance past it so the buffer doesn't grow unbounded.
+    // But only drain up to the start of the first unmatched pattern (or all if no patterns).
+    if events.is_empty() && !clean.is_empty() {
+        // Check if there's any pattern start in the remaining buffer
+        let mut has_partial_pattern = false;
+        for pattern in PATTERNS {
+            // Check if any prefix of a pattern appears at the end of clean
+            let pat_bytes = pattern.as_bytes();
+            for prefix_len in 1..=pat_bytes.len().min(clean.len()) {
+                if clean.as_bytes()[clean.len() - prefix_len..] == pat_bytes[..prefix_len] {
+                    has_partial_pattern = true;
+                    break;
+                }
+            }
+            if has_partial_pattern {
+                break;
+            }
+        }
+        if !has_partial_pattern && !byte_map.is_empty() {
+            // Safe to drain everything — no partial JSON pattern at the end
+            last_consumed_original_pos = byte_map[byte_map.len() - 1] + 1;
+        }
+    }
+
+    let consumed = last_consumed_original_pos.min(buffer.len());
     (events, consumed)
 }
+
 
 /// Classify a parsed JSON value into a KiroEvent
 fn classify_kiro_event(val: Value) -> KiroEvent {
