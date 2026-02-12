@@ -253,24 +253,49 @@ fn merge_adjacent_messages(messages: Vec<serde_json::Value>) -> Vec<serde_json::
         }
 
         let last = merged.last_mut().unwrap();
-        let last_role = last.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        let msg_role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
-        if last_role == msg_role {
-            let last_content = last.get("content")
+        let last_role = if last.get("userInputMessage").is_some() {
+            "user"
+        } else if last.get("assistantResponseMessage").is_some() {
+            "assistant"
+        } else {
+            ""
+        };
+        let msg_role = if msg.get("userInputMessage").is_some() {
+            "user"
+        } else if msg.get("assistantResponseMessage").is_some() {
+            "assistant"
+        } else {
+            ""
+        };
+
+        if last_role == msg_role && !last_role.is_empty() {
+            let (last_key, content_key) = if last_role == "user" {
+                ("userInputMessage", "content")
+            } else {
+                ("assistantResponseMessage", "content")
+            };
+
+            let last_content = last
+                .get(last_key)
+                .and_then(|m| m.get(content_key))
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
-            let msg_content = msg.get("content")
+            let msg_content = msg
+                .get(last_key)
+                .and_then(|m| m.get(content_key))
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            if let Some(content) = last.get_mut("content") {
-                *content = serde_json::Value::String(format!("{}\n{}", last_content, msg_content));
+            if let Some(inner) = last.get_mut(last_key) {
+                if let Some(content) = inner.get_mut(content_key) {
+                    *content = serde_json::Value::String(format!("{}\n{}", last_content, msg_content));
+                }
             }
 
-            tracing::debug!("Merged adjacent {} messages", msg_role);
+            tracing::debug!("Merged adjacent {} messages in history", last_role);
         } else {
             merged.push(msg);
         }
@@ -1971,17 +1996,17 @@ mod tests {
     #[test]
     fn test_merge_adjacent_messages() {
         let messages = vec![
-            serde_json::json!({"role": "user", "content": "hello"}),
-            serde_json::json!({"role": "user", "content": "world"}),
-            serde_json::json!({"role": "assistant", "content": "hi"}),
-            serde_json::json!({"role": "assistant", "content": "there"}),
-            serde_json::json!({"role": "user", "content": "bye"}),
+            serde_json::json!({"userInputMessage": {"content": "hello", "modelId": "m", "origin": "AI_EDITOR"}}),
+            serde_json::json!({"userInputMessage": {"content": "world", "modelId": "m", "origin": "AI_EDITOR"}}),
+            serde_json::json!({"assistantResponseMessage": {"content": "hi"}}),
+            serde_json::json!({"assistantResponseMessage": {"content": "there"}}),
+            serde_json::json!({"userInputMessage": {"content": "bye", "modelId": "m", "origin": "AI_EDITOR"}}),
         ];
         let merged = merge_adjacent_messages(messages);
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0]["content"], "hello\nworld");
-        assert_eq!(merged[1]["content"], "hi\nthere");
-        assert_eq!(merged[2]["content"], "bye");
+        assert_eq!(merged[0]["userInputMessage"]["content"], "hello\nworld");
+        assert_eq!(merged[1]["assistantResponseMessage"]["content"], "hi\nthere");
+        assert_eq!(merged[2]["userInputMessage"]["content"], "bye");
     }
 
     #[test]
@@ -1993,9 +2018,9 @@ mod tests {
     #[test]
     fn test_merge_adjacent_no_merges() {
         let messages = vec![
-            serde_json::json!({"role": "user", "content": "a"}),
-            serde_json::json!({"role": "assistant", "content": "b"}),
-            serde_json::json!({"role": "user", "content": "c"}),
+            serde_json::json!({"userInputMessage": {"content": "a", "modelId": "m", "origin": "AI_EDITOR"}}),
+            serde_json::json!({"assistantResponseMessage": {"content": "b"}}),
+            serde_json::json!({"userInputMessage": {"content": "c", "modelId": "m", "origin": "AI_EDITOR"}}),
         ];
         let merged = merge_adjacent_messages(messages);
         assert_eq!(merged.len(), 3);
