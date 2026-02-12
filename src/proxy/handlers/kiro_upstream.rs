@@ -375,6 +375,164 @@ fn normalize_model_name(name: &str) -> String {
     name.to_string()
 }
 
+/// Convert tool_use and tool_result content blocks to text representations.
+/// Used when the request has NO tools defined — Kiro API rejects toolResults without tool specs.
+fn strip_all_tool_content(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|msg| {
+            let new_content = match &msg.content {
+                MessageContent::String(s) => MessageContent::String(s.clone()),
+                MessageContent::Array(blocks) => {
+                    let new_blocks: Vec<ContentBlock> = blocks
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::ToolUse {
+                                name, input, id, ..
+                            } => ContentBlock::Text {
+                                text: format!(
+                                    "[Tool Call: {}({})] (id: {})",
+                                    name,
+                                    serde_json::to_string(input).unwrap_or_default(),
+                                    id
+                                ),
+                            },
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => {
+                                let text = match content {
+                                    Value::String(s) => s.clone(),
+                                    Value::Array(arr) => arr
+                                        .iter()
+                                        .filter_map(|item| {
+                                            item.get("text").and_then(|t| t.as_str())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    other => other.to_string(),
+                                };
+                                let error_tag = if is_error.unwrap_or(false) {
+                                    " [error]"
+                                } else {
+                                    ""
+                                };
+                                ContentBlock::Text {
+                                    text: format!(
+                                        "[Tool Result ({}): {}{}]",
+                                        tool_use_id, text, error_tag
+                                    ),
+                                }
+                            }
+                            other => other.clone(),
+                        })
+                        .collect();
+                    MessageContent::Array(new_blocks)
+                }
+            };
+            Message {
+                role: msg.role.clone(),
+                content: new_content,
+            }
+        })
+        .collect()
+}
+
+/// Ensure that every user message containing tool_result blocks is preceded by an
+/// assistant message with tool_use blocks. Orphaned tool_results are converted to text.
+fn ensure_assistant_before_tool_results(messages: &[Message]) -> Vec<Message> {
+    let mut result: Vec<Message> = Vec::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        let has_tool_results = match &msg.content {
+            MessageContent::Array(blocks) => blocks.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { .. })
+            }),
+            _ => false,
+        };
+
+        if !has_tool_results {
+            result.push(msg.clone());
+            continue;
+        }
+
+        let prev_has_tool_use = if i > 0 {
+            let prev = &messages[i - 1];
+            prev.role == "assistant"
+                && match &prev.content {
+                    MessageContent::Array(blocks) => {
+                        blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    }
+                    _ => false,
+                }
+        } else {
+            false
+        };
+
+        if prev_has_tool_use {
+            result.push(msg.clone());
+        } else {
+            let new_content = match &msg.content {
+                MessageContent::Array(blocks) => {
+                    let new_blocks: Vec<ContentBlock> = blocks
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => {
+                                let text = match content {
+                                    Value::String(s) => s.clone(),
+                                    Value::Array(arr) => arr
+                                        .iter()
+                                        .filter_map(|item| {
+                                            item.get("text").and_then(|t| t.as_str())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    other => other.to_string(),
+                                };
+                                let error_tag = if is_error.unwrap_or(false) {
+                                    " [error]"
+                                } else {
+                                    ""
+                                };
+                                ContentBlock::Text {
+                                    text: format!(
+                                        "[Tool Result ({}): {}{}]",
+                                        tool_use_id, text, error_tag
+                                    ),
+                                }
+                            }
+                            other => other.clone(),
+                        })
+                        .collect();
+                    MessageContent::Array(new_blocks)
+                }
+                other => other.clone(),
+            };
+            result.push(Message {
+                role: msg.role.clone(),
+                content: new_content,
+            });
+        }
+    }
+
+    result
+}
+
+/// Normalize message roles: Kiro API only supports "user" and "assistant".
+/// Any other role (system, developer, tool, etc.) is converted to "user".
+fn normalize_message_roles(messages: &mut [(String, String, Vec<Value>, Vec<Value>, Vec<Value>)]) {
+    for item in messages.iter_mut() {
+        if item.0 != "user" && item.0 != "assistant" {
+            item.0 = "user".to_string();
+        }
+    }
+}
+
 /// Convert Anthropic ClaudeRequest to Kiro generateAssistantResponse payload
 fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -> Value {
     let model_id = normalize_model_name(&request.model);
@@ -389,8 +547,15 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
             .join("\n"),
     });
 
-    // 2. Merge consecutive same-role messages
-    let merged = merge_to_alternating(&request.messages);
+    // 2. Preprocess messages: strip tool content or fix orphaned tool_results
+    let preprocessed = if request.tools.is_none() {
+        strip_all_tool_content(&request.messages)
+    } else {
+        ensure_assistant_before_tool_results(&request.messages)
+    };
+
+    // 3. Merge consecutive same-role messages
+    let merged = merge_to_alternating(&preprocessed);
     if merged.is_empty() {
         let conversation_id = uuid::Uuid::new_v4().to_string();
         return json!({
@@ -413,6 +578,9 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
     if processed[0].0 != "user" {
         processed.insert(0, ("user".to_string(), "(empty)".to_string(), vec![], vec![], vec![]));
     }
+
+    // 4. Normalize roles (system/developer/tool → user)
+    normalize_message_roles(&mut processed);
 
     let mut alternated: Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> = vec![processed.remove(0)];
     for item in processed {
@@ -1849,5 +2017,148 @@ mod tests {
         assert!(builder.has_tool_calls);
         assert!(final_out.contains("tool_use"));
         assert!(final_out.contains("test_tool"));
+    }
+
+    #[test]
+    fn test_strip_tool_content_no_tools() {
+        let messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::Text { text: "I'll help.".to_string() },
+                    ContentBlock::ToolUse {
+                        id: "tu_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "/tmp/x"}),
+                        signature: None,
+                        cache_control: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu_1".to_string(),
+                        content: Value::String("file contents".to_string()),
+                        is_error: Some(false),
+                    },
+                ]),
+            },
+        ];
+
+        let stripped = strip_all_tool_content(&messages);
+        assert_eq!(stripped.len(), 2);
+
+        if let MessageContent::Array(blocks) = &stripped[0].content {
+            assert!(blocks.iter().all(|b| matches!(b, ContentBlock::Text { .. })));
+            let texts: Vec<&str> = blocks.iter().filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            }).collect();
+            assert!(texts[0].contains("I'll help."));
+            assert!(texts[1].contains("read_file"));
+        } else {
+            panic!("expected Array content");
+        }
+
+        if let MessageContent::Array(blocks) = &stripped[1].content {
+            assert!(blocks.iter().all(|b| matches!(b, ContentBlock::Text { .. })));
+            let text = match &blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => panic!("expected text"),
+            };
+            assert!(text.contains("tu_1"));
+            assert!(text.contains("file contents"));
+        } else {
+            panic!("expected Array content");
+        }
+    }
+
+    #[test]
+    fn test_ensure_assistant_before_tool_results() {
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::String("hello".to_string()),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu_orphan".to_string(),
+                        content: Value::String("orphaned result".to_string()),
+                        is_error: Some(false),
+                    },
+                ]),
+            },
+        ];
+
+        let fixed = ensure_assistant_before_tool_results(&messages);
+        assert_eq!(fixed.len(), 2);
+
+        if let MessageContent::Array(blocks) = &fixed[1].content {
+            assert!(blocks.iter().all(|b| matches!(b, ContentBlock::Text { .. })));
+            let text = match &blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => panic!("expected text"),
+            };
+            assert!(text.contains("tu_orphan"));
+            assert!(text.contains("orphaned result"));
+        } else {
+            panic!("expected Array content");
+        }
+
+        let messages_valid = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::ToolUse {
+                        id: "tu_valid".to_string(),
+                        name: "run".to_string(),
+                        input: json!({}),
+                        signature: None,
+                        cache_control: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tu_valid".to_string(),
+                        content: Value::String("ok".to_string()),
+                        is_error: Some(false),
+                    },
+                ]),
+            },
+        ];
+
+        let kept = ensure_assistant_before_tool_results(&messages_valid);
+        assert_eq!(kept.len(), 2);
+        if let MessageContent::Array(blocks) = &kept[1].content {
+            assert!(blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })));
+        } else {
+            panic!("expected Array content");
+        }
+    }
+
+    #[test]
+    fn test_normalize_roles() {
+        let mut tuples = vec![
+            ("system".to_string(), "sys prompt".to_string(), vec![], vec![], vec![]),
+            ("user".to_string(), "hello".to_string(), vec![], vec![], vec![]),
+            ("assistant".to_string(), "hi".to_string(), vec![], vec![], vec![]),
+            ("developer".to_string(), "dev msg".to_string(), vec![], vec![], vec![]),
+            ("tool".to_string(), "tool msg".to_string(), vec![], vec![], vec![]),
+        ];
+
+        normalize_message_roles(&mut tuples);
+
+        assert_eq!(tuples[0].0, "user");
+        assert_eq!(tuples[1].0, "user");
+        assert_eq!(tuples[2].0, "assistant");
+        assert_eq!(tuples[3].0, "user");
+        assert_eq!(tuples[4].0, "user");
     }
 }
