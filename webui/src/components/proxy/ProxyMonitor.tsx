@@ -79,9 +79,15 @@ const LogTable: React.FC<LogTableProps> = ({
                             onClick={() => onLogClick(log)}
                         >
                             <td style={{ width: '60px' }}>
-                                <span className={`badge badge-xs text-white border-none ${log.status >= 200 && log.status < 400 ? 'badge-success' : 'badge-error'}`}>
-                                    {log.status}
-                                </span>
+                                {log.status === 0 ? (
+                                    <span className="badge badge-xs text-white border-none bg-amber-500 animate-pulse">
+                                        Pending
+                                    </span>
+                                ) : (
+                                    <span className={`badge badge-xs text-white border-none ${log.status >= 200 && log.status < 400 ? 'badge-success' : 'badge-error'}`}>
+                                        {log.status}
+                                    </span>
+                                )}
                             </td>
                             <td className="font-bold" style={{ width: '60px' }}>{log.method}</td>
                             <td className="text-blue-600 truncate" style={{ width: '220px', maxWidth: '220px' }}>
@@ -488,7 +494,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                         <div className="px-4 py-3 border-b border-gray-100 dark:border-base-300 flex items-center justify-between bg-gray-50 dark:bg-base-200">
                             <div className="flex items-center gap-3">
                                 {loadingDetail && <div className="loading loading-spinner loading-sm"></div>}
-                                <span className={`badge badge-sm text-white border-none ${selectedLog.status >= 200 && selectedLog.status < 400 ? 'badge-success' : 'badge-error'}`}>{selectedLog.status}</span>
+                                <span className={`badge badge-sm text-white border-none ${selectedLog.status === 0 ? 'bg-amber-500 animate-pulse' : selectedLog.status >= 200 && selectedLog.status < 400 ? 'badge-success' : 'badge-error'}`}>{selectedLog.status === 0 ? 'Pending' : selectedLog.status}</span>
                                 <span className="font-mono font-bold text-gray-900 dark:text-base-content text-sm">{selectedLog.method}</span>
                                 <span className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-md hidden sm:inline">{selectedLog.url}</span>
                             </div>

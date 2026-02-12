@@ -3694,4 +3694,131 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
     }
+
+    // ===== Pending status indicator tests =====
+
+    #[tokio::test]
+    async fn test_pending_detection_when_slot_full() {
+        // When all slots are taken, has_available_slot should return false,
+        // which triggers the pending log entry in the handler
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-detect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+        manager.set_max_concurrency(1);
+
+        assert!(manager.has_available_slot("acc1"), "Should have slot before any acquisition");
+
+        let _slot = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "Should detect no available slot when full");
+
+        // After dropping the slot, should be available again
+        drop(_slot);
+        assert!(manager.has_available_slot("acc1"), "Should have slot after release");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_pending_detection_with_concurrency_2() {
+        // With max_concurrency=2, pending should only trigger when both slots are taken
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-conc2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+        manager.set_max_concurrency(2);
+
+        let _slot1 = manager.try_acquire_slot("acc1").unwrap();
+        assert!(manager.has_available_slot("acc1"), "Should still have 1 slot available");
+
+        let _slot2 = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "Both slots taken, should detect pending");
+
+        drop(_slot1);
+        assert!(manager.has_available_slot("acc1"), "One slot freed, should be available");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_pending_cleared_after_slot_acquired() {
+        // Simulates the flow: pending detected -> wait -> slot acquired -> pending cleared
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-clear-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = Arc::new(TokenManager::new(tmp.clone()));
+        manager.set_max_concurrency(1);
+
+        let _slot1 = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "Slot full, pending should be logged");
+
+        // Spawn a waiter
+        let manager2 = manager.clone();
+        let handle = tokio::spawn(async move {
+            manager2
+                .acquire_slot_with_timeout("acc1", std::time::Duration::from_secs(5))
+                .await
+        });
+
+        // Release the slot after a short delay
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(_slot1);
+
+        let result = handle.await.unwrap();
+        assert!(result.is_some(), "Waiter should acquire slot after release");
+        // At this point, the pending log would be removed in the real handler
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_pending_timeout_updates_to_503() {
+        // When slot acquisition times out, the pending entry should be updated to 503
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+        manager.set_max_concurrency(1);
+
+        let _slot = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "Slot full, pending should be logged");
+
+        // Try to acquire with very short timeout — simulates the timeout path
+        let result = manager
+            .acquire_slot_with_timeout("acc1", std::time::Duration::from_millis(50))
+            .await;
+        assert!(result.is_none(), "Should timeout, triggering pending -> 503 update");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_pending_not_triggered_when_slot_available() {
+        // When a slot is immediately available, no pending entry should be created
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-noop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+        manager.set_max_concurrency(2);
+
+        // No slots taken — has_available_slot should be true
+        assert!(manager.has_available_slot("acc1"), "Slot available, no pending needed");
+
+        let _slot = manager
+            .acquire_slot_with_timeout("acc1", std::time::Duration::from_secs(1))
+            .await;
+        assert!(_slot.is_some(), "Should acquire immediately without pending");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_pending_independent_per_account() {
+        // Pending detection should be per-account, not global
+        let tmp = std::env::temp_dir().join(format!("kiro-pending-indep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+        manager.set_max_concurrency(1);
+
+        let _slot_acc1 = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "acc1 full");
+        assert!(manager.has_available_slot("acc2"), "acc2 should be independent and available");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

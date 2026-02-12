@@ -96,6 +96,40 @@ pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
 
     Ok(())
 }
+/// Update an existing log entry (used for pending -> completed transitions)
+pub fn update_log(log: &ProxyRequestLog) -> Result<(), String> {
+    let conn = connect_db()?;
+
+    conn.execute(
+        "UPDATE request_logs SET status=?1, duration=?2, model=?3, error=?4, request_body=?5, response_body=?6, input_tokens=?7, output_tokens=?8, account_email=?9, mapped_model=?10, protocol=?11, username=?12 WHERE id=?13",
+        params![
+            log.status,
+            log.duration,
+            log.model,
+            log.error,
+            log.request_body,
+            log.response_body,
+            log.input_tokens,
+            log.output_tokens,
+            log.account_email,
+            log.mapped_model,
+            log.protocol,
+            log.username,
+            log.id,
+        ],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+/// Delete a log entry by ID (used to remove pending entries when request completes normally)
+pub fn delete_log(log_id: &str) -> Result<(), String> {
+    let conn = connect_db()?;
+    conn.execute("DELETE FROM request_logs WHERE id = ?1", params![log_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+
 
 /// Get logs summary (without large request_body and response_body fields) with pagination
 pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestLog>, String> {

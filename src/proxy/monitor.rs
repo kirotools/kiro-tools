@@ -156,6 +156,122 @@ impl ProxyMonitor {
             }
         });
     }
+    /// Log a pending request (status=0) before acquiring concurrency slot
+    pub async fn log_pending_request(&self, log: ProxyRequestLog) {
+        if !self.is_enabled() {
+            return;
+        }
+        tracing::info!("[Monitor] Logging pending request: {} {}", log.method, log.url);
+
+        // Add to memory
+        {
+            let mut logs = self.logs.write().await;
+            if logs.len() >= self.max_logs {
+                logs.pop_back();
+            }
+            logs.push_front(log.clone());
+        }
+
+        // Save to DB
+        let log_to_save = log.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::modules::proxy_db::save_log(&log_to_save) {
+                tracing::error!("Failed to save pending log to DB: {}", e);
+            }
+        });
+    }
+
+    /// Update an existing log entry (pending -> completed)
+    pub async fn update_log(&self, log: ProxyRequestLog) {
+        // Update stats
+        if self.is_enabled() {
+            let mut stats = self.stats.write().await;
+            stats.total_requests += 1;
+            if log.status >= 200 && log.status < 400 {
+                stats.success_count += 1;
+            } else {
+                stats.error_count += 1;
+            }
+        }
+
+        // Record token stats
+        if let (Some(account), Some(input), Some(output)) = (
+            &log.account_email,
+            log.input_tokens,
+            log.output_tokens,
+        ) {
+            let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
+            let account = account.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output) {
+                    tracing::debug!("Failed to record token stats: {}", e);
+                }
+            });
+        }
+
+        if !self.is_enabled() {
+            return;
+        }
+
+        // Update in memory
+        {
+            let mut logs = self.logs.write().await;
+            if let Some(existing) = logs.iter_mut().find(|l| l.id == log.id) {
+                *existing = log.clone();
+            }
+        }
+
+        // Update in DB
+        let log_to_save = log.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::modules::proxy_db::update_log(&log_to_save) {
+                tracing::error!("Failed to update log in DB: {}", e);
+            }
+
+            // Sync to Security DB
+            if let Some(ip) = &log_to_save.client_ip {
+                let security_log = crate::modules::security_db::IpAccessLog {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    client_ip: ip.clone(),
+                    timestamp: log_to_save.timestamp / 1000,
+                    method: Some(log_to_save.method.clone()),
+                    path: Some(log_to_save.url.clone()),
+                    user_agent: None,
+                    status: Some(log_to_save.status as i32),
+                    duration: Some(log_to_save.duration as i64),
+                    api_key_hash: None,
+                    blocked: false,
+                    block_reason: None,
+                    username: log_to_save.username.clone(),
+                };
+
+                if let Err(e) = crate::modules::security_db::save_ip_access_log(&security_log) {
+                    tracing::error!("Failed to save security log: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Remove a pending log entry (when the request proceeds normally and monitor middleware will log the final result)
+    pub async fn remove_pending_log(&self, log_id: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+
+        // Remove from memory
+        {
+            let mut logs = self.logs.write().await;
+            logs.retain(|l| l.id != log_id);
+        }
+
+        // Remove from DB
+        let log_id = log_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = crate::modules::proxy_db::delete_log(&log_id) {
+                tracing::error!("Failed to delete pending log from DB: {}", e);
+            }
+        });
+    }
 
     pub async fn get_logs(&self, limit: usize) -> Vec<ProxyRequestLog> {
         // Try to get from DB first for true history

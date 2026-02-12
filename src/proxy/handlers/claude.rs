@@ -72,12 +72,72 @@ pub async fn handle_messages(
         }
     };
 
+    // Check if we need to wait for a concurrency slot — if so, log a pending entry
+    let needs_wait = !token_manager.has_available_slot(&account_id);
+    let pending_log_id = if needs_wait {
+        let log_id = uuid::Uuid::new_v4().to_string();
+        let pending_log = crate::proxy::monitor::ProxyRequestLog {
+            id: log_id.clone(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            method: "POST".to_string(),
+            url: "/v1/messages".to_string(),
+            status: 0, // 0 = pending/waiting for slot
+            duration: 0,
+            model: Some(request.model.clone()),
+            mapped_model: None,
+            account_email: Some(email.clone()),
+            client_ip: None,
+            error: None,
+            request_body: None,
+            response_body: None,
+            input_tokens: None,
+            output_tokens: None,
+            protocol: Some("anthropic".to_string()),
+            username: None,
+        };
+        state.monitor.log_pending_request(pending_log).await;
+        info!("[{}] ⏳ Waiting for concurrency slot on account: {}", trace_id, email);
+        Some(log_id)
+    } else {
+        None
+    };
+
     let _concurrency_slot: ConcurrencySlot = match token_manager
         .acquire_slot_with_timeout(&account_id, std::time::Duration::from_secs(30))
         .await
     {
-        Some(slot) => slot,
+        Some(slot) => {
+            // Slot acquired — remove pending log entry (monitor middleware will log the final result)
+            if let Some(ref log_id) = pending_log_id {
+                state.monitor.remove_pending_log(log_id).await;
+                info!("[{}] ✓ Concurrency slot acquired after waiting", trace_id);
+            }
+            slot
+        }
         None => {
+            // Timeout — update pending log to show timeout error
+            if let Some(ref log_id) = pending_log_id {
+                let timeout_log = crate::proxy::monitor::ProxyRequestLog {
+                    id: log_id.clone(),
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    method: "POST".to_string(),
+                    url: "/v1/messages".to_string(),
+                    status: 503,
+                    duration: 30000,
+                    model: Some(request.model.clone()),
+                    mapped_model: None,
+                    account_email: Some(email.clone()),
+                    client_ip: None,
+                    error: Some("Concurrency slot timeout (30s)".to_string()),
+                    request_body: None,
+                    response_body: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    protocol: Some("anthropic".to_string()),
+                    username: None,
+                };
+                state.monitor.update_log(timeout_log).await;
+            }
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
@@ -125,6 +185,7 @@ pub async fn handle_messages(
         }))
     ).into_response()
 }
+
 
 pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoResponse {
     use crate::proxy::common::model_mapping::get_all_dynamic_models;
