@@ -762,4 +762,330 @@ mod tests {
         let info = tracker.parse_from_error("acc2", 429, None, quota_body, None, &backoff_steps);
         assert_eq!(info.unwrap().retry_after_sec, 7200);
     }
+
+    // ========================================================================
+    // 多账号限流轮转模拟测试
+    // ========================================================================
+
+    #[test]
+    fn test_multi_account_rotation_skips_rate_limited() {
+        // 模拟：3个账号，acc1 被限流，acc2/acc3 可用
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60, 300];
+
+        // acc1 触发 429
+        tracker.parse_from_error("acc1", 429, Some("60"), "", None, &backoff);
+
+        // acc1 应该被限流
+        assert!(tracker.is_rate_limited("acc1", None));
+        assert!(tracker.get_remaining_wait("acc1", None) > 0);
+
+        // acc2, acc3 不受影响
+        assert!(!tracker.is_rate_limited("acc2", None));
+        assert!(!tracker.is_rate_limited("acc3", None));
+        assert_eq!(tracker.get_remaining_wait("acc2", None), 0);
+        assert_eq!(tracker.get_remaining_wait("acc3", None), 0);
+    }
+
+    #[test]
+    fn test_all_accounts_limited_then_optimistic_reset() {
+        // 模拟：所有账号都被限流，然后执行乐观重置
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+
+        tracker.parse_from_error("acc1", 429, Some("5"), "", None, &backoff);
+        tracker.parse_from_error("acc2", 429, Some("5"), "", None, &backoff);
+        tracker.parse_from_error("acc3", 429, Some("5"), "", None, &backoff);
+
+        assert!(tracker.is_rate_limited("acc1", None));
+        assert!(tracker.is_rate_limited("acc2", None));
+        assert!(tracker.is_rate_limited("acc3", None));
+
+        // 乐观重置
+        tracker.clear_all();
+
+        // 所有账号应该恢复可用
+        assert!(!tracker.is_rate_limited("acc1", None));
+        assert!(!tracker.is_rate_limited("acc2", None));
+        assert!(!tracker.is_rate_limited("acc3", None));
+    }
+
+    #[test]
+    fn test_model_level_isolation_quota_exhausted() {
+        // 模拟：acc1 的 claude-sonnet 配额耗尽，但 claude-haiku 不受影响
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60, 300];
+        let quota_body = r#"{"error":{"details":[{"reason":"QUOTA_EXHAUSTED"}]}}"#;
+
+        // acc1 的 sonnet 模型触发 QuotaExhausted
+        tracker.parse_from_error(
+            "acc1", 429, None, quota_body,
+            Some("claude-sonnet-4".to_string()), &backoff,
+        );
+
+        // sonnet 模型应该被限流
+        assert!(tracker.is_rate_limited("acc1", Some("claude-sonnet-4")));
+        assert!(tracker.get_remaining_wait("acc1", Some("claude-sonnet-4")) > 0);
+
+        // haiku 模型不受影响（QuotaExhausted 使用模型级隔离）
+        assert!(!tracker.is_rate_limited("acc1", Some("claude-haiku-3")));
+        assert_eq!(tracker.get_remaining_wait("acc1", Some("claude-haiku-3")), 0);
+    }
+
+    #[test]
+    fn test_rate_limit_exceeded_locks_entire_account() {
+        // 模拟：RateLimitExceeded (TPM) 应该锁定整个账号，不做模型隔离
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+        let tpm_body = "Rate limit exceeded: tokens per minute quota exhausted";
+
+        tracker.parse_from_error(
+            "acc1", 429, None, tpm_body,
+            Some("claude-sonnet-4".to_string()), &backoff,
+        );
+
+        // 整个账号都应该被限流（不管查哪个模型）
+        assert!(tracker.is_rate_limited("acc1", None));
+        assert!(tracker.is_rate_limited("acc1", Some("claude-sonnet-4")));
+        assert!(tracker.is_rate_limited("acc1", Some("claude-haiku-3")));
+    }
+
+    #[test]
+    fn test_mark_success_resets_failure_count_and_limit() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60, 300, 1800];
+        let quota_body = r#"{"error":{"details":[{"reason":"QUOTA_EXHAUSTED"}]}}"#;
+
+        // 连续失败 2 次
+        tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+        tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+
+        assert!(tracker.is_rate_limited("acc1", None));
+
+        // 标记成功
+        tracker.mark_success("acc1");
+
+        // 限流应该被清除
+        assert!(!tracker.is_rate_limited("acc1", None));
+
+        // 再次失败应该从第 1 次开始（60秒），而不是第 3 次
+        let info = tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 60);
+    }
+
+    #[test]
+    fn test_clear_single_account_preserves_others() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+
+        tracker.parse_from_error("acc1", 429, Some("30"), "", None, &backoff);
+        tracker.parse_from_error("acc2", 429, Some("30"), "", None, &backoff);
+
+        // 只清除 acc1
+        let cleared = tracker.clear("acc1");
+        assert!(cleared);
+
+        assert!(!tracker.is_rate_limited("acc1", None));
+        assert!(tracker.is_rate_limited("acc2", None)); // acc2 不受影响
+    }
+
+    #[test]
+    fn test_cleanup_expired_removes_old_entries() {
+        let tracker = RateLimitTracker::new();
+
+        // 手动插入一个已过期的限流记录
+        tracker.limits.insert(
+            "acc_expired".to_string(),
+            RateLimitInfo {
+                reset_time: SystemTime::now() - Duration::from_secs(10),
+                retry_after_sec: 5,
+                detected_at: SystemTime::now() - Duration::from_secs(15),
+                reason: RateLimitReason::RateLimitExceeded,
+                model: None,
+            },
+        );
+
+        // 插入一个未过期的
+        tracker.limits.insert(
+            "acc_active".to_string(),
+            RateLimitInfo {
+                reset_time: SystemTime::now() + Duration::from_secs(60),
+                retry_after_sec: 60,
+                detected_at: SystemTime::now(),
+                reason: RateLimitReason::QuotaExhausted,
+                model: None,
+            },
+        );
+
+        let cleaned = tracker.cleanup_expired();
+        assert_eq!(cleaned, 1);
+        assert!(!tracker.is_rate_limited("acc_expired", None));
+        assert!(tracker.is_rate_limited("acc_active", None));
+    }
+
+    #[test]
+    fn test_set_lockout_until_precise_time() {
+        let tracker = RateLimitTracker::new();
+
+        let future_time = SystemTime::now() + Duration::from_secs(120);
+        tracker.set_lockout_until("acc1", future_time, RateLimitReason::QuotaExhausted, None);
+
+        assert!(tracker.is_rate_limited("acc1", None));
+        let wait = tracker.get_remaining_wait("acc1", None);
+        assert!(wait > 115 && wait <= 120);
+    }
+
+    #[test]
+    fn test_set_lockout_until_iso_valid() {
+        let tracker = RateLimitTracker::new();
+
+        // 使用一个未来的 ISO 时间
+        let future = chrono::Utc::now() + chrono::Duration::seconds(300);
+        let iso_str = future.to_rfc3339();
+
+        let ok = tracker.set_lockout_until_iso(
+            "acc1", &iso_str, RateLimitReason::QuotaExhausted, None,
+        );
+        assert!(ok);
+        assert!(tracker.is_rate_limited("acc1", None));
+        let wait = tracker.get_remaining_wait("acc1", None);
+        assert!(wait > 295 && wait <= 300);
+    }
+
+    #[test]
+    fn test_set_lockout_until_iso_invalid() {
+        let tracker = RateLimitTracker::new();
+
+        let ok = tracker.set_lockout_until_iso(
+            "acc1", "not-a-date", RateLimitReason::QuotaExhausted, None,
+        );
+        assert!(!ok);
+        assert!(!tracker.is_rate_limited("acc1", None));
+    }
+
+    #[test]
+    fn test_model_capacity_exhausted_backoff() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60, 300];
+        let body = r#"{"error":{"details":[{"reason":"MODEL_CAPACITY_EXHAUSTED"}]}}"#;
+
+        // 第 1 次 → 5 秒
+        let info = tracker.parse_from_error("acc1", 429, None, body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 5);
+
+        // 第 2 次 → 10 秒
+        let info = tracker.parse_from_error("acc1", 429, None, body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 10);
+
+        // 第 3 次 → 15 秒（封顶）
+        let info = tracker.parse_from_error("acc1", 429, None, body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 15);
+
+        // 第 4 次 → 仍然 15 秒
+        let info = tracker.parse_from_error("acc1", 429, None, body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 15);
+    }
+
+    #[test]
+    fn test_404_short_lockout() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+
+        let info = tracker.parse_from_error("acc1", 404, None, "Not Found", None, &backoff);
+        assert!(info.is_some());
+        assert_eq!(info.unwrap().retry_after_sec, 5);
+    }
+
+    #[test]
+    fn test_non_error_status_returns_none() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+
+        // 200, 400, 401 等不应该触发限流
+        assert!(tracker.parse_from_error("acc1", 200, None, "", None, &backoff).is_none());
+        assert!(tracker.parse_from_error("acc1", 400, None, "", None, &backoff).is_none());
+        assert!(tracker.parse_from_error("acc1", 401, None, "", None, &backoff).is_none());
+        assert!(tracker.parse_from_error("acc1", 403, None, "", None, &backoff).is_none());
+    }
+
+    #[test]
+    fn test_concurrent_accounts_independent_backoff() {
+        // 模拟：多个账号各自独立的退避阶梯
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60, 300, 1800];
+        let quota_body = r#"{"error":{"details":[{"reason":"QUOTA_EXHAUSTED"}]}}"#;
+
+        // acc1 失败 3 次
+        tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+        tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+        let info_acc1 = tracker.parse_from_error("acc1", 429, None, quota_body, None, &backoff);
+        assert_eq!(info_acc1.unwrap().retry_after_sec, 1800);
+
+        // acc2 只失败 1 次 — 应该从 60 秒开始，不受 acc1 影响
+        let info_acc2 = tracker.parse_from_error("acc2", 429, None, quota_body, None, &backoff);
+        assert_eq!(info_acc2.unwrap().retry_after_sec, 60);
+    }
+
+    #[test]
+    fn test_parse_duration_string_various_formats() {
+        let tracker = RateLimitTracker::new();
+
+        assert_eq!(tracker.parse_duration_string("42s"), Some(42));
+        assert_eq!(tracker.parse_duration_string("2h1m1s"), Some(7261));
+        assert_eq!(tracker.parse_duration_string("1h30m"), Some(5400));
+        assert_eq!(tracker.parse_duration_string("5m"), Some(300));
+        // 注意：纯 "500ms" 会被正则的 (\d+)m 部分匹配为 500 分钟
+        // 这是已知的正则行为，实际 API 返回的 ms 格式是 "0s500ms" 或 "510.790006ms"
+        // 测试实际的 API 格式
+        assert_eq!(tracker.parse_duration_string("0s500ms"), Some(1)); // ceil(500ms)
+        assert_eq!(tracker.parse_duration_string("1s500ms"), Some(2)); // 1s + ceil(500ms)
+        assert_eq!(tracker.parse_duration_string("510.790006ms"), Some(1)); // ceil(510ms/1000)
+        // 空字符串或无效格式
+        assert_eq!(tracker.parse_duration_string(""), None);
+        assert_eq!(tracker.parse_duration_string("abc"), None);
+    }
+
+    #[test]
+    fn test_retry_after_header_takes_precedence() {
+        let tracker = RateLimitTracker::new();
+        let backoff = vec![60];
+        // body 里有 42s，但 header 说 10s — header 优先
+        let body = r#"{"error":{"details":[{"metadata":{"quotaResetDelay":"42s"}}]}}"#;
+
+        let info = tracker.parse_from_error("acc1", 429, Some("10"), body, None, &backoff);
+        assert_eq!(info.unwrap().retry_after_sec, 10);
+    }
+
+    #[test]
+    fn test_model_level_lockout_with_set_lockout_until() {
+        let tracker = RateLimitTracker::new();
+
+        let future = SystemTime::now() + Duration::from_secs(120);
+        tracker.set_lockout_until(
+            "acc1", future, RateLimitReason::QuotaExhausted,
+            Some("claude-opus-4".to_string()),
+        );
+
+        // 模型级锁：指定模型被限流
+        assert!(tracker.is_rate_limited("acc1", Some("claude-opus-4")));
+        // 其他模型不受影响
+        assert!(!tracker.is_rate_limited("acc1", Some("claude-sonnet-4")));
+        // 账号级也不受影响（没有全局锁）
+        assert!(!tracker.is_rate_limited("acc1", None));
+    }
+
+    #[test]
+    fn test_global_lock_blocks_all_models() {
+        let tracker = RateLimitTracker::new();
+
+        let future = SystemTime::now() + Duration::from_secs(60);
+        // 设置账号级锁（model=None）
+        tracker.set_lockout_until("acc1", future, RateLimitReason::RateLimitExceeded, None);
+
+        // 账号级锁应该阻止所有模型
+        assert!(tracker.is_rate_limited("acc1", None));
+        assert!(tracker.is_rate_limited("acc1", Some("claude-opus-4")));
+        assert!(tracker.is_rate_limited("acc1", Some("claude-sonnet-4")));
+        assert!(tracker.is_rate_limited("acc1", Some("claude-haiku-3")));
+    }
 }
