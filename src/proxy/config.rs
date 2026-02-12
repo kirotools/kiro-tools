@@ -418,6 +418,18 @@ impl Default for SecurityMonitorConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpstreamProxyConfig {
+    #[serde(default)]
+    pub kiro_enabled: bool,
+    #[serde(default)]
+    pub use_preset_proxy: bool,
+    #[serde(default)]
+    pub custom_proxy_url: String,
+    #[serde(default)]
+    pub kiro_api_region: String,
+}
+
 /// 反代服务配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -513,15 +525,14 @@ pub struct ProxyConfig {
     /// 代理池配置
     #[serde(default)]
     pub proxy_pool: ProxyPoolConfig,
+
+    /// 每个账号的最大并发数
+    #[serde(default = "default_max_concurrency_per_account")]
+    pub max_concurrency_per_account: usize,
 }
 
-/// 上游代理配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UpstreamProxyConfig {
-    /// 是否启用
-    pub enabled: bool,
-    /// 代理地址 (http://, https://, socks5://)
-    pub url: String,
+fn default_max_concurrency_per_account() -> usize {
+    1 // 默认并发为1
 }
 
 impl Default for ProxyConfig {
@@ -549,6 +560,7 @@ impl Default for ProxyConfig {
             thinking_budget: ThinkingBudgetConfig::default(),
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
+            max_concurrency_per_account: default_max_concurrency_per_account(),
         }
     }
 }

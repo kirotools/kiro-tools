@@ -14,75 +14,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
     #[serde(default)]
-    pub auto_launch: bool, // Launch on startup
-    #[serde(default)]
-    pub quota_protection: QuotaProtectionConfig, // [NEW] Quota protection configuration
-    #[serde(default)]
-    pub pinned_quota_models: PinnedQuotaModelsConfig, // [NEW] Pinned quota models list
-    #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig, // [NEW] Circuit breaker configuration
     #[serde(default)]
     pub hidden_menu_items: Vec<String>, // Hidden menu item path list
-}
-
-/// Quota protection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuotaProtectionConfig {
-    /// Whether quota protection is enabled
-    pub enabled: bool,
-
-    /// Reserved quota percentage (1-99)
-    pub threshold_percentage: u32,
-
-    /// List of monitored models (e.g. claude-sonnet-4-5)
-    #[serde(default = "default_monitored_models")]
-    pub monitored_models: Vec<String>,
-}
-
-fn default_monitored_models() -> Vec<String> {
-    vec!["claude".to_string()]
-}
-
-impl QuotaProtectionConfig {
-    pub fn new() -> Self {
-        Self {
-            enabled: false,
-            threshold_percentage: 10, // Default 10% reserve
-            monitored_models: default_monitored_models(),
-        }
-    }
-}
-
-impl Default for QuotaProtectionConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Pinned quota models configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PinnedQuotaModelsConfig {
-    /// List of pinned models (displayed outside the account list)
-    #[serde(default = "default_pinned_models")]
-    pub models: Vec<String>,
-}
-
-fn default_pinned_models() -> Vec<String> {
-    vec!["claude-sonnet-4-5-thinking".to_string()]
-}
-
-impl PinnedQuotaModelsConfig {
-    pub fn new() -> Self {
-        Self {
-            models: default_pinned_models(),
-        }
-    }
-}
-
-impl Default for PinnedQuotaModelsConfig {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Circuit breaker configuration
@@ -127,9 +61,6 @@ impl AppConfig {
             sync_interval: 5,
             default_export_path: None,
             proxy: ProxyConfig::default(),
-            auto_launch: false,
-            quota_protection: QuotaProtectionConfig::default(),
-            pinned_quota_models: PinnedQuotaModelsConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             hidden_menu_items: Vec::new(),
         }

@@ -13,19 +13,31 @@ impl AccountService {
 
     /// 添加账号逻辑
     ///
-    /// Either `refresh_token` or `creds_file` (path to Kiro credential JSON) must be provided.
-    /// When `creds_file` is given, the KiroAuthManager loads the full credential chain
-    /// (including clientIdHash → device registration → clientId/clientSecret for Enterprise SSO OIDC).
-    pub async fn add_account(&self, refresh_token: Option<&str>, creds_file: Option<&str>) -> Result<Account, String> {
-        if refresh_token.is_none() && creds_file.is_none() {
-            return Err("Either refreshToken or credsFile must be provided".to_string());
+    /// One of `refresh_token`, `creds_file`, or `sqlite_db` must be provided.
+    /// - `refresh_token`: Direct refresh token string (Kiro Desktop auth)
+    /// - `creds_file`: Path to JSON credentials file (Kiro IDE or kiro-cli)
+    /// - `sqlite_db`: Path to kiro-cli SQLite database
+    pub async fn add_account(
+        &self,
+        refresh_token: Option<&str>,
+        creds_file: Option<&str>,
+        sqlite_db: Option<&str>,
+    ) -> Result<Account, String> {
+        if refresh_token.is_none() && creds_file.is_none() && sqlite_db.is_none() {
+            return Err("Either refreshToken, credsFile, or sqliteDb must be provided".to_string());
         }
 
         // [FIX #1583] 生成临时 UUID 作为账号上下文，避免传递 None 导致代理选择异常
         let temp_account_id = uuid::Uuid::new_v4().to_string();
-        
+
         // 1. 获取 Token (使用临时 ID 确保代理选择有明确上下文)
-        let token_res = modules::oauth::refresh_access_token(refresh_token, creds_file, Some(&temp_account_id)).await?;
+        let token_res = modules::oauth::refresh_access_token_with_source(
+            refresh_token,
+            creds_file,
+            sqlite_db,
+            Some(&temp_account_id),
+        )
+        .await?;
 
         // 2. 获取用户信息
         let user_info = modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await?;

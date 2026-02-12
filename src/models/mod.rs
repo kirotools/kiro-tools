@@ -6,6 +6,6 @@ pub mod token;
 pub use account::{
     Account, AccountExportItem, AccountExportResponse, AccountIndex, AccountSummary,
 };
-pub use config::{AppConfig, CircuitBreakerConfig, QuotaProtectionConfig};
+pub use config::{AppConfig, CircuitBreakerConfig};
 pub use quota::QuotaData;
 pub use token::TokenData;

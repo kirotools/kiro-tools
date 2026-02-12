@@ -1,6 +1,5 @@
 use serde::Serialize;
 use serde_json;
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -16,7 +15,6 @@ use std::sync::Mutex;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
 
     // Global mutex to prevent concurrent test execution
@@ -230,7 +228,6 @@ mod tests {
                     name: Some("User One".to_string()),
                     disabled: false,
                     proxy_disabled: false,
-                    protected_models: HashSet::new(),
                     created_at: now,
                     last_used: now,
                 },
@@ -240,7 +237,6 @@ mod tests {
                     name: None,
                     disabled: true,
                     proxy_disabled: true,
-                    protected_models: HashSet::new(),
                     created_at: now - 100,
                     last_used: now - 50,
                 },
@@ -470,7 +466,6 @@ fn rebuild_index_from_accounts_in_dir(data_dir: &PathBuf) -> Result<AccountIndex
                                         name: account.name,
                                         disabled: account.disabled,
                                         proxy_disabled: account.proxy_disabled,
-                                        protected_models: account.protected_models,
                                         created_at: account.created_at,
                                         last_used: account.last_used,
                                     });
@@ -715,7 +710,6 @@ pub fn add_account(
         name: account.name.clone(),
         disabled: account.disabled,
         proxy_disabled: account.proxy_disabled,
-        protected_models: account.protected_models.clone(),
         created_at: account.created_at,
         last_used: account.last_used,
     });
@@ -1011,85 +1005,8 @@ pub fn update_account_quota(account_id: &str, quota: QuotaData) -> Result<(), St
     let mut account = load_account(account_id)?;
     account.update_quota(quota);
 
-    // --- Quota protection logic start ---
-    if let Ok(config) = crate::modules::config::load_app_config() {
-        if config.quota_protection.enabled {
-            if let Some(ref q) = account.quota {
-                let threshold = config.quota_protection.threshold_percentage as i32;
-
-                let mut group_min_percentage: HashMap<String, i32> = HashMap::new();
-
-                for model in &q.models {
-                    if let Some(std_id) =
-                        crate::proxy::common::model_mapping::normalize_to_standard_id(&model.name)
-                    {
-                        let entry = group_min_percentage.entry(std_id).or_insert(100);
-                        if model.percentage < *entry {
-                            *entry = model.percentage;
-                        }
-                    }
-                }
-
-                for std_id in &config.quota_protection.monitored_models {
-                    let min_pct = group_min_percentage.get(std_id).cloned().unwrap_or(100);
-
-                    if min_pct <= threshold {
-                        if !account.protected_models.contains(std_id) {
-                            crate::modules::logger::log_info(&format!(
-                                "[Quota] Triggering model protection: {} (Group: {} Min: {}% <= Thres: {}%)",
-                                account.email, std_id, min_pct, threshold
-                            ));
-                            account.protected_models.insert(std_id.clone());
-                        }
-                    } else {
-                        if account.protected_models.contains(std_id) {
-                            crate::modules::logger::log_info(&format!(
-                                "[Quota] Model protection recovered: {} (Group: {} Min: {}% > Thres: {}%)",
-                                account.email, std_id, min_pct, threshold
-                            ));
-                            account.protected_models.remove(std_id);
-                        }
-                    }
-                }
-
-                // [Compatibility] Migrate from account-level to model-level protection if previously disabled for quota
-                if account.proxy_disabled
-                    && account
-                        .proxy_disabled_reason
-                        .as_ref()
-                        .map_or(false, |r| r == "quota_protection")
-                {
-                    crate::modules::logger::log_info(&format!(
-                        "[Quota] Migrating account {} from account-level to model-level protection",
-                        account.email
-                    ));
-                    account.proxy_disabled = false;
-                    account.proxy_disabled_reason = None;
-                    account.proxy_disabled_at = None;
-                }
-            }
-        }
-    }
-    // --- Quota protection logic end ---
-
-    // Save account first
     save_account(&account)?;
 
-    // [FIX] 同时更新索引文件中的摘要信息，确保列表页图标即时刷新
-    {
-        let _lock = ACCOUNT_INDEX_LOCK
-            .lock()
-            .map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
-        if let Ok(mut index) = load_account_index() {
-            if let Some(summary) = index.accounts.iter_mut().find(|a| a.id == account_id) {
-                summary.protected_models = account.protected_models.clone();
-                let _ = save_account_index(&index);
-            }
-        }
-    }
-
-    // [FIX] Trigger TokenManager account reload signal
-    // This ensures in-memory protected_models are updated
     crate::proxy::server::trigger_account_reload(account_id);
 
     Ok(())
