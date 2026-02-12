@@ -49,37 +49,120 @@ jobs:
           mkdir -p "${PKG_DIR}/usr/bin"
           mkdir -p "${PKG_DIR}/usr/share/kiro-tools/dist"
           mkdir -p "${PKG_DIR}/lib/systemd/system"
+          mkdir -p "${PKG_DIR}/etc/kiro-tools"
 
           cp target/release/kiro-tools "${PKG_DIR}/usr/bin/"
           cp -r webui/dist/* "${PKG_DIR}/usr/share/kiro-tools/dist/"
 
-          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          # --- control ---
+          cat > "${PKG_DIR}/DEBIAN/control" << 'CTRL'
           Package: kiro-tools
-          Version: ${VERSION}
+          Version: VERSIONPLACEHOLDER
           Section: net
           Priority: optional
           Architecture: amd64
+          Depends: libc6, libssl3 | libssl1.1, ca-certificates
           Maintainer: you
           Description: Kiro Tools - Anthropic compatible proxy with multi-account rotation
-          EOF
-          # 去掉 heredoc 缩进
+           Standalone proxy server providing Anthropic /v1/messages API
+           with multi-account rotation, WebUI management, and credits tracking.
+          CTRL
           sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+          sed -i "s/VERSIONPLACEHOLDER/${VERSION}/" "${PKG_DIR}/DEBIAN/control"
 
-          cat > "${PKG_DIR}/lib/systemd/system/kiro-tools.service" << EOF
+          # --- conffiles ---
+          cat > "${PKG_DIR}/DEBIAN/conffiles" << 'CONF'
+          /etc/kiro-tools/env
+          CONF
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/conffiles"
+
+          # --- postinst ---
+          cat > "${PKG_DIR}/DEBIAN/postinst" << 'POSTINST'
+          #!/bin/sh
+          set -e
+          if [ "$1" = "configure" ]; then
+              systemctl daemon-reload || true
+              echo ""
+              echo "============================================"
+              echo "  kiro-tools 安装完成"
+              echo "============================================"
+              echo ""
+              echo "  配置凭证:"
+              echo "    编辑 /etc/kiro-tools/env 设置 KIRO_CREDS_FILE"
+              echo ""
+              echo "  启动服务:"
+              echo "    sudo systemctl start kiro-tools"
+              echo "    sudo systemctl enable kiro-tools"
+              echo ""
+              echo "  查看日志:"
+              echo "    journalctl -u kiro-tools -f"
+              echo "============================================"
+          fi
+          POSTINST
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/postinst"
+          chmod 755 "${PKG_DIR}/DEBIAN/postinst"
+
+          # --- prerm ---
+          cat > "${PKG_DIR}/DEBIAN/prerm" << 'PRERM'
+          #!/bin/sh
+          set -e
+          if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+              if systemctl is-active --quiet kiro-tools 2>/dev/null; then
+                  echo "停止 kiro-tools 服务..."
+                  systemctl stop kiro-tools || true
+              fi
+              if systemctl is-enabled --quiet kiro-tools 2>/dev/null; then
+                  systemctl disable kiro-tools || true
+              fi
+          fi
+          PRERM
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/prerm"
+          chmod 755 "${PKG_DIR}/DEBIAN/prerm"
+
+          # --- postrm ---
+          cat > "${PKG_DIR}/DEBIAN/postrm" << 'POSTRM'
+          #!/bin/sh
+          set -e
+          if [ "$1" = "purge" ]; then
+              rm -rf /etc/kiro-tools
+          fi
+          systemctl daemon-reload || true
+          POSTRM
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/postrm"
+          chmod 755 "${PKG_DIR}/DEBIAN/postrm"
+
+          # --- 默认环境变量文件 ---
+          cat > "${PKG_DIR}/etc/kiro-tools/env" << 'ENVFILE'
+          # Kiro Tools 环境变量配置
+          # 取消注释并修改以下配置项
+
+          # 凭证文件路径 (必需)
+          #KIRO_CREDS_FILE=/path/to/kiro-auth-token.json
+
+          # 监听端口 (默认 8045)
+          #KIRO_PORT=8045
+          ENVFILE
+          sed -i 's/^          //' "${PKG_DIR}/etc/kiro-tools/env"
+
+          # --- systemd service ---
+          cat > "${PKG_DIR}/lib/systemd/system/kiro-tools.service" << 'SVC'
           [Unit]
           Description=Kiro Tools Proxy Server
-          After=network.target
+          After=network-online.target
+          Wants=network-online.target
 
           [Service]
           Type=simple
           Environment=KIRO_DIST_PATH=/usr/share/kiro-tools/dist
+          EnvironmentFile=-/etc/kiro-tools/env
           ExecStart=/usr/bin/kiro-tools
           Restart=on-failure
           RestartSec=5
+          LimitNOFILE=65536
 
           [Install]
           WantedBy=multi-user.target
-          EOF
+          SVC
           sed -i 's/^          //' "${PKG_DIR}/lib/systemd/system/kiro-tools.service"
 
           dpkg-deb --build "${PKG_DIR}"
@@ -117,7 +200,7 @@ jobs:
         with:
           allowUpdates: true
           name: "Kiro Tools ${{ github.ref_name }}"
-          body: "See [README](README.md) for usage."
+          generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: "artifacts/**/*.tar.gz,artifacts/**/*.deb"
           artifactErrorsFailBuild: false
