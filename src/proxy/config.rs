@@ -418,6 +418,162 @@ impl Default for SecurityMonitorConfig {
     }
 }
 
+// ============================================================================
+// Gateway 迁移：新增配置结构体
+// ============================================================================
+
+/// Fake Reasoning 配置
+/// 控制是否注入或剥离 fake reasoning 标签
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FakeReasoningConfig {
+    /// 是否启用 fake reasoning
+    #[serde(default)]
+    pub enabled: bool,
+    /// 处理方式: "inject" | "strip"
+    #[serde(default = "default_fake_reasoning_handling")]
+    pub handling: String,
+    /// 最大 token 数
+    #[serde(default = "default_fake_reasoning_max_tokens")]
+    pub max_tokens: u32,
+    /// 开放标签列表
+    #[serde(default = "default_fake_reasoning_open_tags")]
+    pub open_tags: Vec<String>,
+}
+
+fn default_fake_reasoning_handling() -> String {
+    "inject".to_string()
+}
+
+fn default_fake_reasoning_max_tokens() -> u32 {
+    8000
+}
+
+fn default_fake_reasoning_open_tags() -> Vec<String> {
+    vec![
+        "<thinking>".to_string(),
+        "<think>".to_string(),
+        "<reasoning>".to_string(),
+    ]
+}
+
+impl Default for FakeReasoningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            handling: default_fake_reasoning_handling(),
+            max_tokens: default_fake_reasoning_max_tokens(),
+            open_tags: default_fake_reasoning_open_tags(),
+        }
+    }
+}
+
+/// 截断恢复配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TruncationConfig {
+    /// 是否启用截断恢复
+    #[serde(default = "default_true")]
+    pub recovery_enabled: bool,
+}
+
+impl Default for TruncationConfig {
+    fn default() -> Self {
+        Self {
+            recovery_enabled: true,
+        }
+    }
+}
+
+/// 流式处理配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingConfig {
+    /// 首 token 超时时间（秒）
+    #[serde(default = "default_first_token_timeout_secs")]
+    pub first_token_timeout_secs: u64,
+    /// 首 token 超时最大重试次数
+    #[serde(default = "default_first_token_max_retries")]
+    pub first_token_max_retries: u32,
+    /// 读取超时时间（秒）
+    #[serde(default = "default_read_timeout_secs")]
+    pub read_timeout_secs: u64,
+}
+
+fn default_first_token_timeout_secs() -> u64 {
+    30
+}
+
+fn default_first_token_max_retries() -> u32 {
+    2
+}
+
+fn default_read_timeout_secs() -> u64 {
+    120
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            first_token_timeout_secs: default_first_token_timeout_secs(),
+            first_token_max_retries: default_first_token_max_retries(),
+            read_timeout_secs: default_read_timeout_secs(),
+        }
+    }
+}
+
+/// 模型相关配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// 工具描述最大长度
+    #[serde(default = "default_tool_description_max_length")]
+    pub tool_description_max_length: usize,
+    /// 模型别名映射 (别名 → 实际模型名)
+    #[serde(default = "default_model_aliases")]
+    pub model_aliases: HashMap<String, String>,
+    /// 隐藏模型映射 (显示名 → 内部 Kiro ID)
+    #[serde(default = "default_hidden_models")]
+    pub hidden_models: HashMap<String, String>,
+    /// 回退模型列表
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+    /// 从 /v1/models 列表中隐藏的模型 (仍可直接请求)
+    #[serde(default = "default_hidden_from_list")]
+    pub hidden_from_list: Vec<String>,
+}
+
+fn default_tool_description_max_length() -> usize {
+    4096
+}
+
+fn default_hidden_models() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert(
+        "claude-3.7-sonnet".to_string(),
+        "CLAUDE_3_7_SONNET_20250219_V1_0".to_string(),
+    );
+    m
+}
+
+fn default_model_aliases() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("auto-kiro".to_string(), "auto".to_string());
+    m
+}
+
+fn default_hidden_from_list() -> Vec<String> {
+    vec!["auto".to_string()]
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            tool_description_max_length: default_tool_description_max_length(),
+            model_aliases: default_model_aliases(),
+            hidden_models: default_hidden_models(),
+            fallback_models: Vec::new(),
+            hidden_from_list: default_hidden_from_list(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpstreamProxyConfig {
     #[serde(default)]
@@ -529,6 +685,22 @@ pub struct ProxyConfig {
     /// 每个账号的最大并发数
     #[serde(default = "default_max_concurrency_per_account")]
     pub max_concurrency_per_account: usize,
+
+    /// Fake Reasoning 配置
+    #[serde(default)]
+    pub fake_reasoning: FakeReasoningConfig,
+
+    /// 截断恢复配置
+    #[serde(default)]
+    pub truncation: TruncationConfig,
+
+    /// 流式处理配置
+    #[serde(default)]
+    pub streaming: StreamingConfig,
+
+    /// 模型相关配置
+    #[serde(default)]
+    pub model_config: ModelConfig,
 }
 
 fn default_max_concurrency_per_account() -> usize {
@@ -561,6 +733,10 @@ impl Default for ProxyConfig {
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
             max_concurrency_per_account: default_max_concurrency_per_account(),
+            fake_reasoning: FakeReasoningConfig::default(),
+            truncation: TruncationConfig::default(),
+            streaming: StreamingConfig::default(),
+            model_config: ModelConfig::default(),
         }
     }
 }
@@ -703,5 +879,91 @@ mod tests {
         // 测试边缘情况
         assert_eq!(normalize_proxy_url(""), "");
         assert_eq!(normalize_proxy_url("   "), "");
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property 14: FakeReasoningConfig serde roundtrip.
+        #[test]
+        fn prop_fake_reasoning_config_roundtrip(
+            enabled in any::<bool>(),
+            max_tokens in 1..100_000u32,
+        ) {
+            let cfg = FakeReasoningConfig {
+                enabled,
+                handling: "inject".into(),
+                max_tokens,
+                open_tags: vec!["<thinking>".into()],
+            };
+            let toml_str = toml::to_string(&cfg).unwrap();
+            let back: FakeReasoningConfig = toml::from_str(&toml_str).unwrap();
+            prop_assert_eq!(back.enabled, cfg.enabled);
+            prop_assert_eq!(back.max_tokens, cfg.max_tokens);
+            prop_assert_eq!(back.handling, cfg.handling);
+        }
+
+        #[test]
+        fn prop_truncation_config_roundtrip(recovery_enabled in any::<bool>()) {
+            let cfg = TruncationConfig { recovery_enabled };
+            let toml_str = toml::to_string(&cfg).unwrap();
+            let back: TruncationConfig = toml::from_str(&toml_str).unwrap();
+            prop_assert_eq!(back.recovery_enabled, cfg.recovery_enabled);
+        }
+
+        #[test]
+        fn prop_streaming_config_roundtrip(
+            first_token in 1..300u64,
+            retries in 0..10u32,
+            read_timeout in 1..600u64,
+        ) {
+            let cfg = StreamingConfig {
+                first_token_timeout_secs: first_token,
+                first_token_max_retries: retries,
+                read_timeout_secs: read_timeout,
+            };
+            let toml_str = toml::to_string(&cfg).unwrap();
+            let back: StreamingConfig = toml::from_str(&toml_str).unwrap();
+            prop_assert_eq!(back.first_token_timeout_secs, cfg.first_token_timeout_secs);
+            prop_assert_eq!(back.first_token_max_retries, cfg.first_token_max_retries);
+            prop_assert_eq!(back.read_timeout_secs, cfg.read_timeout_secs);
+        }
+
+        #[test]
+        fn prop_model_config_roundtrip(max_len in 1..10_000usize) {
+            let cfg = ModelConfig {
+                tool_description_max_length: max_len,
+                model_aliases: std::collections::HashMap::new(),
+                hidden_models: std::collections::HashMap::new(),
+                fallback_models: Vec::new(),
+                hidden_from_list: Vec::new(),
+            };
+            let toml_str = toml::to_string(&cfg).unwrap();
+            let back: ModelConfig = toml::from_str(&toml_str).unwrap();
+            prop_assert_eq!(back.tool_description_max_length, cfg.tool_description_max_length);
+        }
+    }
+
+    #[test]
+    fn test_model_config_defaults() {
+        let config = ModelConfig::default();
+        assert!(config.hidden_models.contains_key("claude-3.7-sonnet"));
+        assert_eq!(
+            config.hidden_models["claude-3.7-sonnet"],
+            "CLAUDE_3_7_SONNET_20250219_V1_0"
+        );
+        assert!(config.model_aliases.contains_key("auto-kiro"));
+        assert_eq!(config.model_aliases["auto-kiro"], "auto");
+        assert!(config.hidden_from_list.contains(&"auto".to_string()));
+    }
+
+    #[test]
+    fn test_model_config_toml_roundtrip() {
+        let config = ModelConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ModelConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.hidden_models, config.hidden_models);
+        assert_eq!(parsed.model_aliases, config.model_aliases);
+        assert_eq!(parsed.hidden_from_list, config.hidden_from_list);
     }
 }
