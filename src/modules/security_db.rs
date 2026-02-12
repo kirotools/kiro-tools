@@ -294,8 +294,8 @@ pub fn get_ip_stats() -> Result<IpStats, String> {
             "SELECT
                 COUNT(*) as total,
                 COUNT(DISTINCT client_ip) as unique_ips,
-                SUM(CASE WHEN blocked = 1 THEN 1 ELSE 0 END) as blocked,
-                SUM(CASE WHEN timestamp >= ?1 THEN 1 ELSE 0 END) as today
+                COALESCE(SUM(CASE WHEN blocked = 1 THEN 1 ELSE 0 END), 0) as blocked,
+                COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN 1 ELSE 0 END), 0) as today
              FROM ip_access_logs",
             [today_start],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
