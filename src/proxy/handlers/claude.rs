@@ -170,6 +170,7 @@ pub async fn handle_messages(
             &account_id,
             &trace_id,
             &region,
+            _concurrency_slot,
         )
         .await;
     }

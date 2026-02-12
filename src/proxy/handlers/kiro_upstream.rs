@@ -16,6 +16,7 @@ use crate::auth::config::{get_kiro_q_host, get_machine_fingerprint};
 use crate::proxy::mappers::claude::models::{
     ClaudeRequest, ContentBlock, Message, MessageContent, SystemPrompt,
 };
+use crate::proxy::token_manager::ConcurrencySlot;
 
 // ===== Kiro Headers =====
 
@@ -842,6 +843,7 @@ pub async fn handle_kiro_messages(
     account_id: &str,
     trace_id: &str,
     region: &str,
+    concurrency_slot: ConcurrencySlot,
 ) -> Response {
     let fingerprint = get_machine_fingerprint();
     let kiro_host = get_kiro_q_host(region);
@@ -1061,6 +1063,10 @@ pub async fn handle_kiro_messages(
         let byte_stream = resp.bytes_stream();
 
         let sse_stream = async_stream::stream! {
+            // Hold the concurrency slot alive for the entire duration of the stream.
+            // It will be dropped when the stream ends, releasing the slot.
+            let _slot_guard = concurrency_slot;
+
             let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
             let mut buffer = BytesMut::new();
 
