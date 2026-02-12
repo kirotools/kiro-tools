@@ -379,7 +379,7 @@ fn default_fake_reasoning_open_tags() -> Vec<String> {
 impl Default for FakeReasoningConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             handling: default_fake_reasoning_handling(),
             max_tokens: default_fake_reasoning_max_tokens(),
             open_tags: default_fake_reasoning_open_tags(),
