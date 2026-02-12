@@ -459,6 +459,7 @@ impl KiroAuthManager {
             return Ok(inner.access_token.clone().unwrap());
         }
 
+        // SQLite mode: reload from DB before refresh (kiro-cli may have updated)
         if inner.sqlite_db.is_some() && inner.is_token_expiring_soon() {
             debug!("SQLite mode: reloading credentials before refresh attempt");
             if let Some(ref db_path) = inner.sqlite_db.clone() {
@@ -466,6 +467,18 @@ impl KiroAuthManager {
             }
             if inner.access_token.is_some() && !inner.is_token_expiring_soon() {
                 debug!("SQLite reload provided fresh token, no refresh needed");
+                return Ok(inner.access_token.clone().unwrap());
+            }
+        }
+
+        // Creds file mode: reload from file before refresh (Kiro IDE may have updated)
+        if inner.creds_file.is_some() && inner.sqlite_db.is_none() && inner.is_token_expiring_soon() {
+            debug!("Creds file mode: reloading credentials before refresh attempt");
+            if let Some(ref file_path) = inner.creds_file.clone() {
+                inner.load_credentials_from_file(file_path);
+            }
+            if inner.access_token.is_some() && !inner.is_token_expiring_soon() {
+                debug!("Creds file reload provided fresh token, no refresh needed");
                 return Ok(inner.access_token.clone().unwrap());
             }
         }
@@ -479,6 +492,17 @@ impl KiroAuthManager {
                     warn!("Using existing access_token until it expires. \
                            Run 'kiro-cli login' when convenient to refresh credentials.");
                     return Ok(inner.access_token.clone().unwrap());
+                } else {
+                    return Err(AuthError::TokenExpiredRefreshFailed);
+                }
+            }
+            Err(AuthError::HttpStatus { status: 401, .. }) if inner.creds_file.is_some() => {
+                warn!("Token refresh failed with 401, reloading from creds file and retrying...");
+                if let Some(ref file_path) = inner.creds_file.clone() {
+                    inner.load_credentials_from_file(file_path);
+                }
+                if inner.refresh_token.is_some() {
+                    inner.refresh_token_request().await?;
                 } else {
                     return Err(AuthError::TokenExpiredRefreshFailed);
                 }
