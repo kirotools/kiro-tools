@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { BrainCircuit } from "lucide-react";
 import { ProxyConfig } from "../../types/config";
-import ThinkingBudget from "./ThinkingBudget";
 import GlobalSystemPrompt from "./GlobalSystemPrompt";
 
 interface AdvancedThinkingProps {
@@ -32,22 +31,11 @@ export default function AdvancedThinking({
                     </div>
                 </div>
 
-                <div className="space-y-4 divide-y divide-gray-100 dark:divide-gray-800">
-                    {/* 1. 思考预算 (Thinking Budget) */}
-                    <div className="pt-0">
-                        <ThinkingBudget
-                            config={config.thinking_budget || { mode: 'auto', custom_value: 24576 }}
-                            onChange={(newConfig) => onChange({ ...config, thinking_budget: newConfig })}
-                        />
-                    </div>
-
-                    {/* 2. 全局系统提示词 (Global System Prompt) */}
-                    <div className="pt-4">
-                        <GlobalSystemPrompt
-                            config={config.global_system_prompt || { enabled: false, content: '' }}
-                            onChange={(newConfig) => onChange({ ...config, global_system_prompt: newConfig })}
-                        />
-                    </div>
+                <div className="space-y-4">
+                    <GlobalSystemPrompt
+                        config={config.global_system_prompt || { enabled: false, content: '' }}
+                        onChange={(newConfig) => onChange({ ...config, global_system_prompt: newConfig })}
+                    />
                 </div>
             </div>
         </div>

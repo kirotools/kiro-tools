@@ -21,43 +21,6 @@ pub fn normalize_proxy_url(url: &str) -> String {
 }
 
 // ============================================================================
-// 全局 Thinking Budget 配置存储
-// 用于在 request transform 函数中访问配置（无需修改函数签名）
-// ============================================================================
-static GLOBAL_THINKING_BUDGET_CONFIG: OnceLock<RwLock<ThinkingBudgetConfig>> = OnceLock::new();
-
-#[allow(dead_code)]
-pub fn get_thinking_budget_config() -> ThinkingBudgetConfig {
-    GLOBAL_THINKING_BUDGET_CONFIG
-        .get()
-        .and_then(|lock| lock.read().ok())
-        .map(|cfg| cfg.clone())
-        .unwrap_or_default()
-}
-
-/// 更新全局 Thinking Budget 配置
-pub fn update_thinking_budget_config(config: ThinkingBudgetConfig) {
-    if let Some(lock) = GLOBAL_THINKING_BUDGET_CONFIG.get() {
-        if let Ok(mut cfg) = lock.write() {
-            *cfg = config.clone();
-            tracing::info!(
-                "[Thinking-Budget] Global config updated: mode={:?}, custom_value={}",
-                config.mode,
-                config.custom_value
-            );
-        }
-    } else {
-        // 首次初始化
-        let _ = GLOBAL_THINKING_BUDGET_CONFIG.set(RwLock::new(config.clone()));
-        tracing::info!(
-            "[Thinking-Budget] Global config initialized: mode={:?}, custom_value={}",
-            config.mode,
-            config.custom_value
-        );
-    }
-}
-
-// ============================================================================
 // 全局系统提示词配置存储
 // 用户可在设置中配置一段全局提示词，自动注入到所有请求的 systemInstruction 中
 // ============================================================================
@@ -281,49 +244,6 @@ fn default_threshold_l2() -> f32 {
 }
 fn default_threshold_l3() -> f32 {
     0.7
-}
-
-/// Thinking Budget 模式
-/// 控制如何处理调用方传入的 thinking_budget 参数
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingBudgetMode {
-    /// 自动限制：对特定模型（Flash/Thinking）应用 24576 上限
-    Auto,
-    /// 透传：完全使用调用方传入的值，不做任何修改
-    Passthrough,
-    /// 自定义：使用用户设定的固定值覆盖所有请求
-    Custom,
-}
-
-impl Default for ThinkingBudgetMode {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-/// Thinking Budget 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThinkingBudgetConfig {
-    /// 模式选择
-    #[serde(default)]
-    pub mode: ThinkingBudgetMode,
-    /// 自定义固定值（仅在 mode=Custom 时生效）
-    #[serde(default = "default_thinking_budget_custom_value")]
-    pub custom_value: u32,
-}
-
-impl Default for ThinkingBudgetConfig {
-    fn default() -> Self {
-        Self {
-            mode: ThinkingBudgetMode::Auto,
-            custom_value: default_thinking_budget_custom_value(),
-        }
-    }
-}
-
-fn default_thinking_budget_custom_value() -> u32 {
-    24576
 }
 
 fn default_true() -> bool {
@@ -668,11 +588,6 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub saved_user_agent: Option<String>,
 
-    /// Thinking Budget 配置
-    /// 控制如何处理 AI 深度思考时的 Token 预算
-    #[serde(default)]
-    pub thinking_budget: ThinkingBudgetConfig,
-
     /// 全局系统提示词配置
     /// 自动注入到所有 API 请求的 systemInstruction 中
     #[serde(default)]
@@ -729,7 +644,6 @@ impl Default for ProxyConfig {
             preferred_account_id: None, // 默认使用轮询模式
             user_agent_override: None,
             saved_user_agent: None,
-            thinking_budget: ThinkingBudgetConfig::default(),
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
             max_concurrency_per_account: default_max_concurrency_per_account(),

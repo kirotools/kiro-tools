@@ -459,20 +459,6 @@
       "title": "Tư duy Nâng cao & Cấu hình Toàn cầu",
       "description": "Quản lý tập trung các khả năng tư duy, chế độ hình ảnh và hướng dẫn toàn cầu."
     },
-    "thinking_budget": {
-      "title": "Ngân sách Suy nghĩ (Thinking Budget)",
-      "description": "Kiểm soát ngân sách token cho suy nghĩ sâu của AI. Một số mô hình (ví dụ: Flash, mô hình có hậu tố -thinking) bị giới hạn ở mức 24576 bởi API upstream.",
-      "mode_label": "Chế độ Xử lý",
-      "mode": {
-        "auto": "Giới hạn Tự động",
-        "passthrough": "Chuyển tiếp",
-        "custom": "Tùy chỉnh"
-      },
-      "auto_hint": "Chế độ Tự động: Tự động giới hạn ngân sách ở mức 24576 cho các mô hình Flash, mô hình có hậu tố -thinking và yêu cầu tìm kiếm web để tránh lỗi API.",
-      "passthrough_warning": "Chế độ Chuyển tiếp: Sử dụng trực tiếp giá trị gốc của người gọi. Việc thiếu hỗ trợ cho các giá trị cao có thể gây ra lỗi.",
-      "custom_value_hint": "Khuyến nghị: 24576 (Flash) hoặc 51200 (Mở rộng)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "Chế độ Tư duy Hình ảnh (Image Thinking Mode)",
       "hint": "Ảnh hưởng đến chất lượng hình ảnh và quy trình tạo",

@@ -1493,6 +1493,7 @@ pub async fn handle_kiro_messages(
     profile_arn: Option<&str>,
     concurrency_slot: ConcurrencySlot,
     token_manager: &crate::proxy::token_manager::TokenManager,
+    original_model: Option<&str>,
 ) -> Response {
     let fingerprint = get_machine_fingerprint();
     let kiro_host = get_kiro_q_host(region);
@@ -1816,14 +1817,18 @@ pub async fn handle_kiro_messages(
             info!("[{}] [Kiro] SSE stream finalized, concurrency slot will be released", trace_id_owned);
         };
 
-        Response::builder()
+        let mut resp_builder = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/event-stream")
             .header(header::CACHE_CONTROL, "no-cache")
             .header(header::CONNECTION, "keep-alive")
             .header("X-Accel-Buffering", "no")
             .header("X-Account-Email", email)
-            .header("X-Kiro-Upstream", "true")
+            .header("X-Kiro-Upstream", "true");
+        if let Some(orig) = original_model {
+            resp_builder = resp_builder.header("X-Mapped-Model", orig);
+        }
+        resp_builder
             .body(Body::from_stream(sse_stream))
             .unwrap()
     } else {
@@ -1889,11 +1894,15 @@ pub async fn handle_kiro_messages(
             }
         });
 
-        Response::builder()
+        let mut resp_builder = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .header("X-Account-Email", email)
-            .header("X-Kiro-Upstream", "true")
+            .header("X-Kiro-Upstream", "true");
+        if let Some(orig) = original_model {
+            resp_builder = resp_builder.header("X-Mapped-Model", orig);
+        }
+        resp_builder
             .body(Body::from(serde_json::to_string(&response_json).unwrap()))
             .unwrap()
     }

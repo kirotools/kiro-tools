@@ -460,20 +460,6 @@
       "title": "高級思維与全局配置",
       "description": "集中管理思維能力、圖像模式及全局指令。"
     },
-    "thinking_budget": {
-      "title": "思考預算 (Thinking Budget)",
-      "description": "控制 AI 深度思考時的 Token 預算。某些模型（如 Flash、帶 -thinking 後綴的模型）受上游 24576 上限限制。",
-      "mode_label": "處理模式",
-      "mode": {
-        "auto": "自動限制",
-        "passthrough": "透傳",
-        "custom": "自定義"
-      },
-      "auto_hint": "自動模式：對 Flash 模型、-thinking 後綴模型、以及啟用 Web Search 的請求自動限制在 24576 以避免 API 錯誤。",
-      "passthrough_warning": "透傳：直接使用調用方原始值，不支持高值可能導致失敗。",
-      "custom_value_hint": "推薦：24576 (Flash) 或 51200 (擴展)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "圖像思維模式 (Image Thinking Mode)",
       "hint": "影響畫質與生成流程",

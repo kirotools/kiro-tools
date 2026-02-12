@@ -20,25 +20,9 @@ export interface ProxyConfig {
     experimental?: ExperimentalConfig;
     user_agent_override?: string;
     saved_user_agent?: string;
-    thinking_budget?: ThinkingBudgetConfig;
     global_system_prompt?: GlobalSystemPromptConfig;
     proxy_pool?: ProxyPoolConfig;
     max_concurrency_per_account?: number;
-}
-
-// ============================================================================
-// Thinking Budget 配置 (控制 AI 深度思考时的 Token 预算)
-// ============================================================================
-
-/** Thinking Budget 处理模式 */
-export type ThinkingBudgetMode = 'auto' | 'passthrough' | 'custom';
-
-/** Thinking Budget 配置 */
-export interface ThinkingBudgetConfig {
-    /** 模式选择 */
-    mode: ThinkingBudgetMode;
-    /** 自定义固定值（仅在 mode=custom 时生效），范围 1024-65536 */
-    custom_value: number;
 }
 
 // ============================================================================

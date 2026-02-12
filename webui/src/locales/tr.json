@@ -436,20 +436,6 @@
       "title": "Gelişmiş Düşünme ve Küresel Yapılandırma",
       "description": "Düşünme yeteneklerini, görüntü modlarını ve küresel talimatları merkezi olarak yönetin."
     },
-    "thinking_budget": {
-      "title": "Düşünme Bütçesi (Thinking Budget)",
-      "description": "Yapay zeka derin düşüncesi için token bütçesini kontrol eder. Bazı modeller (örn: Flash, -thinking ekine sahip modeller) üst akış API'si tarafından 24576 ile sınırlandırılmıştır.",
-      "mode_label": "İşleme Modu",
-      "mode": {
-        "auto": "Otomatik Sınır",
-        "passthrough": "Doğrudan Geçiş",
-        "custom": "Özel"
-      },
-      "auto_hint": "Otomatik Mod: API hatalarını önlemek için Flash modelleri, -thinking ekine sahip modeller ve web arama istekleri için bütçeyi otomatik olarak 24576 ile sınırlar.",
-      "passthrough_warning": "Doğrudan Geçiş: Çağıranın orijinal değerini doğrudan kullanır. Yüksek değerlerin desteklenmemesi hatalara neden olabilir.",
-      "custom_value_hint": "Önerilen: 24576 (Flash) veya 51200 (Genişletilmiş)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "Görüntü Düşünme Modu (Image Thinking Mode)",
       "hint": "Görüntü kalitesini ve oluşturma sürecini etkiler",

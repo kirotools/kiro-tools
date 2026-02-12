@@ -41,7 +41,7 @@ pub async fn handle_messages(
         debug_logger.log_request(&trace_id, &raw).await;
     }
 
-    let request: ClaudeRequest = match serde_json::from_value(body) {
+    let mut request: ClaudeRequest = match serde_json::from_value(body) {
         Ok(r) => r,
         Err(e) => {
             if debug_logger.should_log(true) {
@@ -60,13 +60,28 @@ pub async fn handle_messages(
         }
     };
 
+    // Apply custom model alias mapping (e.g. "claude-opus-4.6" → "claude-opus-4.6-thinking")
+    let original_model = request.model.clone();
+    let mapped_model = {
+        let mapping = state.custom_mapping.read().await;
+        mapping.get(&request.model).cloned()
+    };
+    if let Some(ref target) = mapped_model {
+        info!(
+            "[{}] Model alias applied: {} → {}",
+            trace_id, original_model, target
+        );
+        request.model = target.clone();
+    }
+
     let normalized_model = crate::proxy::common::model_mapping::normalize_to_standard_id(&request.model)
         .unwrap_or_else(|| request.model.clone());
 
     info!(
-        "[{}] Claude Request | Model: {} | Stream: {} | Messages: {} | Tools: {}",
+        "[{}] Claude Request | Model: {}{} | Stream: {} | Messages: {} | Tools: {}",
         trace_id,
         request.model,
+        if mapped_model.is_some() { format!(" (from {})", original_model) } else { String::new() },
         request.stream,
         request.messages.len(),
         request.tools.is_some()
@@ -199,6 +214,7 @@ pub async fn handle_messages(
             profile_arn.as_deref(),
             _concurrency_slot,
             &token_manager,
+            mapped_model.as_ref().map(|_| original_model.as_str()),
         )
         .await;
     }
@@ -219,7 +235,7 @@ pub async fn handle_messages(
 pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoResponse {
     use crate::proxy::common::model_mapping::get_all_dynamic_models;
 
-    let model_ids = get_all_dynamic_models(&state.custom_mapping).await;
+    let model_ids = get_all_dynamic_models(&state.model_cache, &state.custom_mapping).await;
 
     let data: Vec<_> = model_ids.into_iter().map(|id| {
         json!({

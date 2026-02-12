@@ -92,6 +92,7 @@ pub fn take_pending_delete_accounts() -> Vec<String> {
 pub struct AppState {
     pub token_manager: Arc<TokenManager>,
     pub custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub model_cache: Arc<crate::proxy::upstream::model_cache::ModelCache>,
     #[allow(dead_code)]
     pub request_timeout: u64, // API 请求超时(秒)
     #[allow(dead_code)]
@@ -232,9 +233,10 @@ pub struct AxumServer {
     #[allow(dead_code)] // 预留给 cloudflared 运行状态查询与后续控制
     pub cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
     pub is_running: Arc<RwLock<bool>>,
-    pub token_manager: Arc<TokenManager>, // [NEW] 暴露出 TokenManager 供反代服务复用
-    pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [NEW] 代理池配置状态
-    pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [NEW] 暴露代理池管理器供命令调用
+    pub token_manager: Arc<TokenManager>,
+    pub model_cache: Arc<crate::proxy::upstream::model_cache::ModelCache>,
+    pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>,
+    pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>,
 }
 
 #[allow(dead_code)]
@@ -298,10 +300,14 @@ impl AxumServer {
     proxy_pool_manager.clone().start_health_check_loop();
         let security_state = Arc::new(RwLock::new(security_config));
         let is_running_state = Arc::new(RwLock::new(true));
+        let model_cache = Arc::new(crate::proxy::upstream::model_cache::ModelCache::new(
+            std::time::Duration::from_secs(300),
+        ));
 
         let state = AppState {
             token_manager: token_manager.clone(),
             custom_mapping: custom_mapping_state.clone(),
+            model_cache: model_cache.clone(),
             request_timeout: 300, // 5分钟超时
             thought_signature_map: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -550,6 +556,7 @@ impl AxumServer {
             cloudflared_state,
             is_running: is_running_state,
             token_manager: token_manager.clone(),
+            model_cache,
             proxy_pool_state,
             proxy_pool_manager,
         };
@@ -1038,7 +1045,7 @@ async fn admin_trigger_proxy_health_check(
 async fn admin_list_proxy_models(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let models = crate::proxy::common::model_mapping::get_all_models_with_metadata(&state.custom_mapping).await;
+    let models = crate::proxy::common::model_mapping::get_all_models_with_metadata(&state.model_cache, &state.custom_mapping).await;
     Json(serde_json::json!({ "models": models }))
 }
 

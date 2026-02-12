@@ -23,7 +23,6 @@ pub mod tokenizer;
 pub mod model_resolver;
 
 pub use config::update_global_system_prompt_config;
-pub use config::update_thinking_budget_config;
 pub use config::ProxyAuthMode;
 pub use config::ProxyConfig;
 #[allow(unused_imports)]

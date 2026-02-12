@@ -456,20 +456,6 @@
       "title": "Pensamento Avançado e Configuração Global",
       "description": "Gerencie capacidades de pensamento, modos de imagem e instruções globais centralmente."
     },
-    "thinking_budget": {
-      "title": "Orçamento de Pensamento (Thinking Budget)",
-      "description": "Controla o orçamento de tokens para o pensamento profundo da IA. Alguns modelos (ex: Flash, modelos com sufixo -thinking) são limitados a 24576 pela API upstream.",
-      "mode_label": "Modo de Processamento",
-      "mode": {
-        "auto": "Limite Automático",
-        "passthrough": "Passagem Direta",
-        "custom": "Personalizado"
-      },
-      "auto_hint": "Modo Automático: Limita automaticamente o orçamento em 24576 para modelos Flash, modelos com sufixo -thinking e solicitações de pesquisa na web para evitar erros de API.",
-      "passthrough_warning": "Passagem Direta: Usa diretamente o valor original do chamador. A falta de suporte para valores altos pode causar falhas.",
-      "custom_value_hint": "Recomendado: 24576 (Flash) ou 51200 (Estendido)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "Modo de Pensamento de Iimagem (Image Thinking Mode)",
       "hint": "Afeta a qualidade da imagem e o processo de geração",

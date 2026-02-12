@@ -480,20 +480,6 @@
       "title": "推論とグローバル設定",
       "description": "推論能力、画像モード、グローバル命令を集中管理します。"
     },
-    "thinking_budget": {
-      "title": "思考予算 (Thinking Budget)",
-      "description": "AI の思考 Token 予算を制御します。一部のモデル（Flash、-thinking サフィックスなど）は、アップストリームにより 24576 の上限があります。",
-      "mode_label": "処理模式",
-      "mode": {
-        "auto": "自動制限",
-        "passthrough": "パススルー",
-        "custom": "カスタム"
-      },
-      "auto_hint": "自動モード: Claude/Thinking および Web 検索リクエストを、エラーを避けるため自動的に 24576 に制限します。",
-      "passthrough_warning": "パススルー: 呼び出し元の値を直接使用します。高い値は失敗の原因となる可能性があります。",
-      "custom_value_hint": "推奨: 24576 (Flash) または 51200 (拡張思考)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "画像思考モード (Image Thinking Mode)",
       "hint": "画質と生成プロセスに影響します",

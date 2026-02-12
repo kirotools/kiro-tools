@@ -1483,6 +1483,16 @@ impl TokenManager {
         self.tokens.get(account_id)?.profile_arn.clone()
     }
 
+    pub fn get_first_account_region(&self) -> Option<String> {
+        let first_id = self.tokens.iter().next().map(|e| e.key().clone())?;
+        self.get_account_region(&first_id)
+    }
+
+    pub fn get_first_account_profile_arn(&self) -> Option<String> {
+        let first_id = self.tokens.iter().next().map(|e| e.key().clone())?;
+        self.get_account_profile_arn(&first_id)
+    }
+
     /// 通过 email 获取指定账号的 Token（用于预热等需要指定账号的场景）
     /// 此方法会自动刷新过期的 token
     pub async fn get_token_by_email(

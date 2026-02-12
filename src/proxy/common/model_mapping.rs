@@ -1,8 +1,10 @@
 // 模型名称映射 (Kiro upstream only)
+// Dynamic model list fetched from Kiro /ListAvailableModels API with fallback.
 
 use serde::Serialize;
 
-/// Model metadata for frontend display
+use crate::proxy::upstream::model_cache::ModelCache;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -11,81 +13,146 @@ pub struct ModelInfo {
     pub thinking: bool,
 }
 
-/// Kiro-supported base models with display metadata
-const KIRO_BASE_MODELS: &[(&str, &str, &str, bool)] = &[
-    ("claude-haiku-4-5", "Claude Haiku 4.5", "Claude 4", false),
-    ("claude-sonnet-4-5", "Claude Sonnet 4.5", "Claude 4", false),
-    ("claude-sonnet-4-5-thinking", "Claude Sonnet 4.5 (Thinking)", "Claude 4", true),
-    ("claude-opus-4-6", "Claude Opus 4.6", "Claude 4", false),
-    ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)", "Claude 4", true),
+pub const FALLBACK_MODELS: &[&str] = &[
+    "auto",
+    "claude-sonnet-4",
+    "claude-haiku-4.5",
+    "claude-sonnet-4.5",
+    "claude-opus-4.5",
+    "claude-opus-4.6",
 ];
 
-const KIRO_MODELS: &[&str] = &[
-    "claude-haiku-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-5-thinking",
-    "claude-opus-4-6",
-    "claude-opus-4-6-thinking",
-];
+pub async fn fetch_models_from_kiro(
+    access_token: &str,
+    region: &str,
+    profile_arn: Option<&str>,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let host = crate::auth::config::get_kiro_q_host(region);
+    let url = format!("{}/ListAvailableModels", host);
+    let fingerprint = crate::auth::config::get_machine_fingerprint();
 
-pub async fn get_all_dynamic_models(
-    custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
-) -> Vec<String> {
-    use std::collections::HashSet;
-    let mut model_ids: HashSet<String> = KIRO_MODELS.iter().map(|s| s.to_string()).collect();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", access_token).parse()?,
+    );
+    let ua = format!(
+        "aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{}",
+        fingerprint
+    );
+    headers.insert(reqwest::header::USER_AGENT, ua.parse()?);
+    headers.insert(
+        "x-amz-user-agent",
+        format!("aws-sdk-js/1.0.27 KiroIDE-0.7.45-{}", fingerprint).parse()?,
+    );
 
-    {
-        let mapping = custom_mapping.read().await;
-        for key in mapping.keys() {
-            model_ids.insert(key.clone());
-        }
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(&url)
+        .headers(headers)
+        .query(&[("origin", "AI_EDITOR")]);
+    if let Some(arn) = profile_arn {
+        req = req.query(&[("profileArn", arn)]);
     }
 
-    let mut sorted_ids: Vec<_> = model_ids.into_iter().collect();
-    sorted_ids.sort();
-    sorted_ids
+    let resp = req
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(format!("ListAvailableModels HTTP {}", resp.status()).into());
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let models = data
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("modelId").and_then(|id| id.as_str()).map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if models.is_empty() {
+        return Err("ListAvailableModels returned empty list".into());
+    }
+
+    tracing::info!(
+        "Fetched {} models from Kiro API: {:?}",
+        models.len(),
+        models
+    );
+    Ok(models)
+}
+
+pub async fn get_all_dynamic_models(
+    model_cache: &ModelCache,
+    _custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+) -> Vec<String> {
+    let cached = model_cache
+        .get_models(|| async { Ok(FALLBACK_MODELS.iter().map(|s| s.to_string()).collect()) })
+        .await
+        .unwrap_or_else(|_| FALLBACK_MODELS.iter().map(|s| s.to_string()).collect());
+
+    let mut sorted: Vec<_> = cached.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+fn model_display_name(id: &str) -> String {
+    let parts: Vec<&str> = id.split('-').collect();
+    if parts.len() >= 3 && parts[0] == "claude" {
+        let family = parts[1];
+        let version = parts[2..].join(".");
+        format!("Claude {} {}", capitalize(family), version)
+    } else if parts.len() == 2 && parts[0] == "claude" {
+        format!("Claude {}", capitalize(parts[1]))
+    } else {
+        id.to_string()
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 pub async fn get_all_models_with_metadata(
-    custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    model_cache: &ModelCache,
+    _custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
 ) -> Vec<ModelInfo> {
-    use std::collections::HashSet;
+    let cached = model_cache
+        .get_models(|| async { Ok(FALLBACK_MODELS.iter().map(|s| s.to_string()).collect()) })
+        .await
+        .unwrap_or_else(|_| FALLBACK_MODELS.iter().map(|s| s.to_string()).collect());
 
-    let mut models: Vec<ModelInfo> = KIRO_BASE_MODELS
-        .iter()
-        .map(|(id, name, group, thinking)| ModelInfo {
-            id: id.to_string(),
-            name: name.to_string(),
-            group: group.to_string(),
-            thinking: *thinking,
+    let mut models: Vec<ModelInfo> = cached
+        .into_iter()
+        .map(|id| {
+            let group = if id.starts_with("claude") {
+                "Claude".to_string()
+            } else {
+                "Other".to_string()
+            };
+            ModelInfo {
+                name: model_display_name(&id),
+                group,
+                thinking: id.contains("thinking"),
+                id,
+            }
         })
         .collect();
-
-    let known_ids: HashSet<&str> = KIRO_BASE_MODELS.iter().map(|(id, _, _, _)| *id).collect();
-
-    {
-        let mapping = custom_mapping.read().await;
-        for key in mapping.keys() {
-            if !known_ids.contains(key.as_str()) {
-                models.push(ModelInfo {
-                    id: key.clone(),
-                    name: key.clone(),
-                    group: "Custom".to_string(),
-                    thinking: key.contains("thinking"),
-                });
-            }
-        }
-    }
 
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models
 }
 
-/// Normalize any physical model name to a standard protection ID for quota tracking.
-/// Returns `None` if the model doesn't match any protected category.
 pub fn normalize_to_standard_id(model_name: &str) -> Option<String> {
     let lower = model_name.to_lowercase();
-    
     if lower.starts_with("claude") {
         Some("claude".to_string())
     } else {
@@ -99,8 +166,33 @@ mod tests {
 
     #[test]
     fn test_normalize() {
-        assert_eq!(normalize_to_standard_id("claude-opus-4-6-thinking"), Some("claude".to_string()));
-        assert_eq!(normalize_to_standard_id("claude-sonnet-4-5"), Some("claude".to_string()));
+        assert_eq!(
+            normalize_to_standard_id("claude-opus-4-6-thinking"),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            normalize_to_standard_id("claude-sonnet-4-5"),
+            Some("claude".to_string())
+        );
         assert_eq!(normalize_to_standard_id("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_model_display_name() {
+        assert_eq!(model_display_name("claude-sonnet-4.5"), "Claude Sonnet 4.5");
+        assert_eq!(model_display_name("claude-haiku-4.5"), "Claude Haiku 4.5");
+        assert_eq!(model_display_name("claude-opus-4.6"), "Claude Opus 4.6");
+        assert_eq!(model_display_name("auto"), "auto");
+    }
+
+    #[test]
+    fn test_fallback_models_no_thinking_variants() {
+        for m in FALLBACK_MODELS {
+            assert!(
+                !m.contains("thinking"),
+                "Fallback '{}' should not have thinking variant",
+                m
+            );
+        }
     }
 }

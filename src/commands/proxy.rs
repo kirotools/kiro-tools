@@ -128,6 +128,71 @@ pub async fn internal_start_proxy_service(
 
     let active_accounts = token_manager.load_accounts().await.unwrap_or(0);
 
+    // Auto-import from KIRO_CREDS_FILE env var if no accounts exist (matching gateway behavior)
+    let active_accounts = if active_accounts == 0 {
+        if let Ok(creds_file) = std::env::var("KIRO_CREDS_FILE") {
+            let expanded = if creds_file.starts_with('~') {
+                if let Some(home) = dirs::home_dir() {
+                    creds_file.replacen('~', &home.to_string_lossy(), 1)
+                } else {
+                    creds_file.clone()
+                }
+            } else {
+                creds_file.clone()
+            };
+            if std::path::Path::new(&expanded).exists() {
+                tracing::info!("No accounts found, auto-importing from KIRO_CREDS_FILE: {}", expanded);
+
+                let svc = crate::modules::account_service::AccountService::new(integration.clone());
+                match svc.add_account(None, Some(&expanded), None).await {
+                    Ok(account) => {
+                        tracing::info!("Auto-imported account from KIRO_CREDS_FILE: {}", account.email);
+                        token_manager.load_accounts().await.unwrap_or(0)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to auto-import from KIRO_CREDS_FILE: {}", e);
+                        0
+                    }
+                }
+            } else {
+                tracing::warn!("KIRO_CREDS_FILE set but file not found: {}", expanded);
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        active_accounts
+    };
+
+    // Populate model cache from Kiro API (matching gateway startup behavior)
+    {
+        let admin_lock = state.admin_server.read().await;
+        let model_cache = admin_lock.as_ref().unwrap().axum_server.model_cache.clone();
+        let tm = token_manager.clone();
+        tokio::spawn(async move {
+            if let Ok((access_token, _project_id, _email, _account_id, _wait)) =
+                tm.get_token("claude", false, None, "claude-sonnet-4.5").await
+            {
+                let region = tm.get_first_account_region().unwrap_or_else(|| "us-east-1".to_string());
+                let profile_arn = tm.get_first_account_profile_arn();
+                let arn_ref = profile_arn.as_deref();
+                match crate::proxy::common::model_mapping::fetch_models_from_kiro(
+                    &access_token, &region, arn_ref,
+                ).await {
+                    Ok(models) => {
+                        let models_clone = models.clone();
+                        let _ = model_cache.get_models(move || async move { Ok(models_clone) }).await;
+                        tracing::info!("Model cache populated: {} models from Kiro API", models.len());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch models from Kiro API: {}, using fallback", e);
+                    }
+                }
+            }
+        });
+    }
+
     if active_accounts == 0 {
         let legacy_enabled = config.legacy_provider.enabled
             && !matches!(config.legacy_provider.dispatch_mode, crate::proxy::LegacyDispatchMode::Off);
@@ -214,7 +279,6 @@ pub async fn ensure_admin_server(
         server_handle,
     });
 
-    crate::proxy::update_thinking_budget_config(config.thinking_budget.clone());
     crate::proxy::update_global_system_prompt_config(config.global_system_prompt.clone());
 
     Ok(())

@@ -480,20 +480,6 @@
       "title": "Advanced Thinking & Global Config",
       "description": "Manage thinking capabilities, image modes, and global instructions."
     },
-    "thinking_budget": {
-      "title": "Thinking Budget",
-      "description": "Controls the token budget for AI deep thinking. Some models (e.g., Flash, -thinking suffix models) are limited to 24576 by upstream API.",
-      "mode_label": "Processing Mode",
-      "mode": {
-        "auto": "Auto Limit",
-        "passthrough": "Passthrough",
-        "custom": "Custom"
-      },
-      "auto_hint": "Auto mode: Automatically caps budget to 24576 for Flash, -thinking suffix models, and Web Search requests.",
-      "passthrough_warning": "Passthrough: Uses caller's value directly. High values may cause failures.",
-      "custom_value_hint": "Rec: 24576 (Flash) or 51200 (Extended)",
-      "tokens": "tokens"
-    },
     "image_thinking_mode": {
       "title": "Image Thinking Mode",
       "hint": "Affects quality and generation flow",
