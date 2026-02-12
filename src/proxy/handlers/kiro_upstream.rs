@@ -468,22 +468,32 @@ enum KiroEvent {
 /// Parse JSON objects from an AWS event stream binary buffer.
 /// AWS event stream embeds JSON payloads in binary frames.
 /// We scan for JSON objects by matching braces.
-fn parse_events_from_buffer(buffer: &[u8]) -> Vec<KiroEvent> {
+///
+/// Returns (events, consumed_bytes) — caller should drain consumed_bytes from the buffer
+/// to preserve any incomplete JSON fragment at the tail for the next chunk.
+fn parse_events_from_buffer(buffer: &[u8]) -> (Vec<KiroEvent>, usize) {
     let mut events = Vec::new();
     let text = String::from_utf8_lossy(buffer);
 
-    // Find all JSON objects in the text
-    let mut i = 0;
+    // We work with chars for correct JSON parsing, but need to track byte positions
+    // for the caller to drain the buffer correctly.
+    let mut char_idx = 0;
+    let mut byte_offset = 0; // tracks byte position corresponding to char_idx
+    let mut last_consumed_byte = 0;
     let chars: Vec<char> = text.chars().collect();
-    while i < chars.len() {
-        if chars[i] == '{' {
-            // Try to find matching closing brace
+
+    // Pre-compute byte lengths for each char
+    let char_byte_lens: Vec<usize> = chars.iter().map(|c| c.len_utf8()).collect();
+
+    while char_idx < chars.len() {
+        if chars[char_idx] == '{' {
             let mut depth = 0;
             let mut in_string = false;
             let mut escape_next = false;
-            let start = i;
+            let start = char_idx;
+            let mut found = false;
 
-            for j in i..chars.len() {
+            for j in char_idx..chars.len() {
                 if escape_next {
                     escape_next = false;
                     continue;
@@ -499,23 +509,33 @@ fn parse_events_from_buffer(buffer: &[u8]) -> Vec<KiroEvent> {
                             if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
                                 events.push(classify_kiro_event(val));
                             }
-                            i = j + 1;
+                            // Advance byte_offset to after this JSON object
+                            let bytes_consumed: usize = char_byte_lens[char_idx..=j].iter().sum();
+                            byte_offset += bytes_consumed;
+                            char_idx = j + 1;
+                            last_consumed_byte = byte_offset;
+                            found = true;
                             break;
                         }
                     }
                     _ => {}
                 }
-                if j == chars.len() - 1 {
-                    // Didn't find matching brace, skip this opening brace
-                    i = start + 1;
-                }
+            }
+            if !found {
+                // Incomplete JSON at end of buffer — stop here, preserve from current position
+                break;
             }
         } else {
-            i += 1;
+            byte_offset += char_byte_lens[char_idx];
+            char_idx += 1;
+            last_consumed_byte = byte_offset;
         }
     }
 
-    events
+    // Clamp to buffer length as safety measure (from_utf8_lossy can expand invalid bytes)
+    let consumed = last_consumed_byte.min(buffer.len());
+
+    (events, consumed)
 }
 
 /// Classify a parsed JSON value into a KiroEvent
@@ -1072,19 +1092,23 @@ pub async fn handle_kiro_messages(
 
             let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
             let mut buffer = BytesMut::new();
+            let mut chunk_count: usize = 0;
+            let mut total_bytes: usize = 0;
 
             tokio::pin!(byte_stream);
 
             while let Some(chunk_result) = byte_stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
+                        chunk_count += 1;
+                        total_bytes += chunk.len();
                         buffer.extend_from_slice(&chunk);
 
                         // Parse events from accumulated buffer
-                        let events = parse_events_from_buffer(&buffer);
-                        // Clear buffer after parsing (simplified — in production you'd track consumed bytes)
-                        if !events.is_empty() {
-                            buffer.clear();
+                        let (events, consumed) = parse_events_from_buffer(&buffer);
+                        // Only drain the consumed portion — preserve incomplete JSON at tail
+                        if consumed > 0 {
+                            let _ = buffer.split_to(consumed);
                         }
 
                         for event in events {
@@ -1095,17 +1119,22 @@ pub async fn handle_kiro_messages(
                         }
                     }
                     Err(e) => {
-                        warn!("[{}] [Kiro] Stream chunk error: {}", trace_id_owned, e);
+                        warn!("[{}] [Kiro] Stream chunk error after {} chunks ({} bytes): {}", trace_id_owned, chunk_count, total_bytes, e);
                         break;
                     }
                 }
             }
+
+            info!("[{}] [Kiro] Stream ended normally after {} chunks, {} bytes, {} chars output",
+                trace_id_owned, chunk_count, total_bytes, builder.output_char_count);
 
             // Finalize the stream
             let final_sse = builder.finalize();
             if !final_sse.is_empty() {
                 yield Ok::<Bytes, std::io::Error>(Bytes::from(final_sse));
             }
+
+            info!("[{}] [Kiro] SSE stream finalized, concurrency slot will be released", trace_id_owned);
         };
 
         Response::builder()
@@ -1129,7 +1158,7 @@ pub async fn handle_kiro_messages(
             }
         };
 
-        let events = parse_events_from_buffer(&body_bytes);
+        let (events, _consumed) = parse_events_from_buffer(&body_bytes);
         let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
 
         let mut text_parts = Vec::new();
