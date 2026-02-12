@@ -951,6 +951,7 @@ export default function ApiProxy() {
                                             const val = parseInt(e.target.value);
                                             if (!isNaN(val) && val >= 1) {
                                                 updateProxyConfig({ max_concurrency_per_account: val });
+                                                showToast(t('proxy.config.max_concurrency_updated', { defaultValue: `Concurrency set to ${val}` }), 'success');
                                             }
                                         }}
                                         min={1}
