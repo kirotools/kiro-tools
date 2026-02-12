@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{json, Value};
 use tracing::info;
 
+use crate::proxy::debug_logger::{DebugLogger, DebugMode};
 use crate::proxy::mappers::claude::models::ClaudeRequest;
 use crate::proxy::server::AppState;
 use crate::proxy::token_manager::ConcurrencySlot;
@@ -23,9 +24,29 @@ pub async fn handle_messages(
         .map(char::from)
         .collect::<String>().to_lowercase();
 
+    let debug_mode = match std::env::var("KIRO_DEBUG_MODE").as_deref() {
+        Ok("all") => DebugMode::All,
+        Ok("errors") => DebugMode::ErrorsOnly,
+        _ => DebugMode::Off,
+    };
+    let debug_logger = DebugLogger::new(
+        debug_mode,
+        std::path::PathBuf::from(
+            std::env::var("KIRO_DEBUG_DIR").unwrap_or_else(|_| "/tmp/kiro-debug".to_string())
+        ),
+    );
+
+    if debug_logger.should_log(false) {
+        let raw = serde_json::to_vec(&body).unwrap_or_default();
+        debug_logger.log_request(&trace_id, &raw).await;
+    }
+
     let request: ClaudeRequest = match serde_json::from_value(body) {
         Ok(r) => r,
         Err(e) => {
+            if debug_logger.should_log(true) {
+                debug_logger.log_error(&trace_id, &format!("Invalid request body: {}", e)).await;
+            }
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -59,6 +80,9 @@ pub async fn handle_messages(
     {
         Ok(t) => t,
         Err(e) => {
+            if debug_logger.should_log(true) {
+                debug_logger.log_error(&trace_id, &format!("No available accounts: {}", e)).await;
+            }
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
@@ -158,6 +182,8 @@ pub async fn handle_messages(
             .get_account_region(&account_id)
             .unwrap_or_else(|| "us-east-1".to_string());
 
+        let profile_arn = token_manager.get_account_profile_arn(&account_id);
+
         info!(
             "[{}] [Kiro] Routing to native upstream | Account: {} | Region: {}",
             trace_id, email, region
@@ -170,6 +196,7 @@ pub async fn handle_messages(
             &account_id,
             &trace_id,
             &region,
+            profile_arn.as_deref(),
             _concurrency_slot,
         )
         .await;

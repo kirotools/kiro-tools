@@ -5,7 +5,7 @@
 use axum::{
     body::Body,
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -13,10 +13,15 @@ use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::config::{get_kiro_q_host, get_machine_fingerprint};
+use crate::proxy::common::errors::{error_response, AnthropicErrorType};
+use crate::proxy::errors::kiro_errors::map_kiro_error;
+use crate::proxy::errors::network_errors::classify_network_error;
 use crate::proxy::mappers::claude::models::{
     ClaudeRequest, ContentBlock, Message, MessageContent, SystemPrompt,
 };
 use crate::proxy::token_manager::ConcurrencySlot;
+use crate::proxy::upstream::thinking_parser::{ThinkingParser, ThinkingEvent};
+use crate::proxy::upstream::parsers::parse_bracket_tool_calls;
 
 // ===== Kiro Headers =====
 
@@ -33,7 +38,7 @@ fn get_kiro_headers(token: &str, fingerprint: &str) -> reqwest::header::HeaderMa
     );
 
     let ua = format!(
-        "aws-sdk-js/1.0.27 ua/2.1 os/linux#6.1.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{}",
+        "aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{}",
         fingerprint
     );
     headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
@@ -79,12 +84,49 @@ fn extract_text(content: &MessageContent) -> String {
                             parts.push(thinking.clone());
                         }
                     }
+                    ContentBlock::Image { source, .. } => {
+                        parts.push(format!("[Image: {}]", source.media_type));
+                    }
                     _ => {}
                 }
             }
             parts.join("\n")
         }
     }
+}
+
+/// Extract images from content blocks, converting to Kiro format.
+/// Kiro format: [{"format": "jpeg", "source": {"bytes": "base64..."}}]
+fn extract_images(content: &MessageContent) -> Vec<Value> {
+    let mut images = Vec::new();
+    if let MessageContent::Array(blocks) = content {
+        for block in blocks {
+            if let ContentBlock::Image { source, .. } = block {
+                let mut data = source.data.clone();
+                let mut media_type = source.media_type.clone();
+
+                // Strip data URL prefix if present (e.g., "data:image/jpeg;base64,...")
+                if data.starts_with("data:") {
+                    if let Some(comma_pos) = data.find(',') {
+                        let header = &data[..comma_pos];
+                        let media_part = header.split(';').next().unwrap_or("");
+                        let extracted = media_part.strip_prefix("data:").unwrap_or("");
+                        if !extracted.is_empty() {
+                            media_type = extracted.to_string();
+                        }
+                        data = data[comma_pos + 1..].to_string();
+                    }
+                }
+
+                let format_str = media_type.split('/').last().unwrap_or(&media_type).to_string();
+                images.push(json!({
+                    "format": format_str,
+                    "source": { "bytes": data }
+                }));
+            }
+        }
+    }
+    images
 }
 
 /// Extract tool uses from assistant message content blocks
@@ -142,12 +184,17 @@ fn extract_tool_results(content: &MessageContent) -> Vec<Value> {
 }
 
 /// Build tool specifications from Anthropic tools definition
-fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Tool]) -> Vec<Value> {
+fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Tool], max_desc_length: usize) -> Vec<Value> {
     tools
         .iter()
         .filter_map(|tool| {
             let name = tool.name.as_deref()?;
             let description = tool.description.as_deref().unwrap_or("");
+            let description = if max_desc_length > 0 && description.len() > max_desc_length {
+                &description[..max_desc_length]
+            } else {
+                description
+            };
             let schema = tool.input_schema.clone().unwrap_or(json!({}));
             Some(json!({
                 "toolSpecification": {
@@ -163,18 +210,17 @@ fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Too
 }
 
 /// Merge consecutive same-role messages into alternating user/assistant pairs
-fn merge_to_alternating(messages: &[Message]) -> Vec<(String, String, Vec<Value>, Vec<Value>)> {
-    // Returns: Vec<(role, text, tool_uses, tool_results)>
-    let mut merged: Vec<(String, String, Vec<Value>, Vec<Value>)> = Vec::new();
+fn merge_to_alternating(messages: &[Message]) -> Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> {
+    let mut merged: Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> = Vec::new();
 
     for msg in messages {
         let text = extract_text(&msg.content);
         let tool_uses = extract_tool_uses(&msg.content);
         let tool_results = extract_tool_results(&msg.content);
+        let images = extract_images(&msg.content);
 
         if let Some(last) = merged.last_mut() {
             if last.0 == msg.role {
-                // Same role — merge
                 if !text.is_empty() {
                     if !last.1.is_empty() {
                         last.1.push('\n');
@@ -183,10 +229,51 @@ fn merge_to_alternating(messages: &[Message]) -> Vec<(String, String, Vec<Value>
                 }
                 last.2.extend(tool_uses);
                 last.3.extend(tool_results);
+                last.4.extend(images);
                 continue;
             }
         }
-        merged.push((msg.role.clone(), text, tool_uses, tool_results));
+        merged.push((msg.role.clone(), text, tool_uses, tool_results, images));
+    }
+
+    merged
+}
+
+fn merge_adjacent_messages(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    if messages.is_empty() {
+        return messages;
+    }
+
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+
+    for msg in messages {
+        if merged.is_empty() {
+            merged.push(msg);
+            continue;
+        }
+
+        let last = merged.last_mut().unwrap();
+        let last_role = last.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let msg_role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+        if last_role == msg_role {
+            let last_content = last.get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let msg_content = msg.get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some(content) = last.get_mut("content") {
+                *content = serde_json::Value::String(format!("{}\n{}", last_content, msg_content));
+            }
+
+            tracing::debug!("Merged adjacent {} messages", msg_role);
+        } else {
+            merged.push(msg);
+        }
     }
 
     merged
@@ -289,7 +376,7 @@ fn normalize_model_name(name: &str) -> String {
 }
 
 /// Convert Anthropic ClaudeRequest to Kiro generateAssistantResponse payload
-fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
+fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -> Value {
     let model_id = normalize_model_name(&request.model);
 
     // 1. Extract system prompt
@@ -324,19 +411,17 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
     // 3. Ensure first message is user
     let mut processed = merged;
     if processed[0].0 != "user" {
-        processed.insert(0, ("user".to_string(), "(empty)".to_string(), vec![], vec![]));
+        processed.insert(0, ("user".to_string(), "(empty)".to_string(), vec![], vec![], vec![]));
     }
 
-    // 4. Ensure alternating roles — insert synthetic "(empty)" messages where needed
-    let mut alternated: Vec<(String, String, Vec<Value>, Vec<Value>)> = vec![processed.remove(0)];
+    let mut alternated: Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> = vec![processed.remove(0)];
     for item in processed {
         if let Some(last) = alternated.last() {
             if last.0 == item.0 {
-                // Same role consecutive — insert synthetic opposite
                 if item.0 == "user" {
-                    alternated.push(("assistant".to_string(), "(empty)".to_string(), vec![], vec![]));
+                    alternated.push(("assistant".to_string(), "(empty)".to_string(), vec![], vec![], vec![]));
                 } else {
-                    alternated.push(("user".to_string(), "(empty)".to_string(), vec![], vec![]));
+                    alternated.push(("user".to_string(), "(empty)".to_string(), vec![], vec![], vec![]));
                 }
             }
         }
@@ -362,7 +447,7 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
         let last_assistant = processed.pop().unwrap();
         // Re-add as history
         processed.push(last_assistant);
-        processed.push(("user".to_string(), "Continue".to_string(), vec![], vec![]));
+        processed.push(("user".to_string(), "Continue".to_string(), vec![], vec![], vec![]));
     }
 
     // 7. Split into history (all but last) and currentMessage (last)
@@ -371,7 +456,7 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
 
     // 8. Build history array — with userInputMessageContext.toolResults for user messages
     let mut history = Vec::new();
-    for (role, text, tool_uses, tool_results) in &history_items {
+    for (role, text, tool_uses, tool_results, images) in &history_items {
         if role == "user" {
             let content = if text.is_empty() { "(empty)" } else { text.as_str() };
             let mut user_input = json!({
@@ -380,7 +465,10 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
                 "origin": "AI_EDITOR"
             });
 
-            // Add toolResults in userInputMessageContext if present
+            if !images.is_empty() {
+                user_input["images"] = json!(images);
+            }
+
             if !tool_results.is_empty() {
                 user_input["userInputMessageContext"] = json!({
                     "toolResults": tool_results
@@ -399,7 +487,7 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
     }
 
     // 9. Build currentMessage
-    let (_, current_text, _current_tool_uses, current_tool_results) = last;
+    let (_, current_text, _current_tool_uses, current_tool_results, current_images) = last;
     let current_content = if current_text.is_empty() {
         "Continue".to_string()
     } else {
@@ -412,12 +500,16 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
         "origin": "AI_EDITOR"
     });
 
+    if !current_images.is_empty() {
+        user_input_message["images"] = json!(current_images);
+    }
+
     // Build userInputMessageContext (tools + toolResults)
     let mut user_input_context = serde_json::Map::new();
 
     // Add tool specifications under "tools" key (NOT "toolSpecification")
     if let Some(tools) = &request.tools {
-        let specs = build_tool_specifications(tools);
+        let specs = build_tool_specifications(tools, TOOL_DESCRIPTION_MAX_LENGTH);
         if !specs.is_empty() {
             user_input_context.insert("tools".to_string(), json!(specs));
         }
@@ -443,12 +535,28 @@ fn convert_to_kiro_payload(request: &ClaudeRequest) -> Value {
         "currentMessage": current_message
     });
 
-    // Only add history if non-empty
+    let history = merge_adjacent_messages(history);
+
     if !history.is_empty() {
         conversation_state["history"] = json!(history);
     }
 
-    json!({ "conversationState": conversation_state })
+    if let Some(thinking) = &request.thinking {
+        if let Some(budget) = thinking.budget_tokens {
+            conversation_state["thinkingConfig"] = json!({
+                "enabled": true,
+                "budgetTokens": budget
+            });
+        }
+    }
+
+    let mut payload = json!({ "conversationState": conversation_state });
+
+    if let Some(arn) = profile_arn {
+        payload["profileArn"] = json!(arn);
+    }
+
+    payload
 }
 
 // ===== AWS Event Stream Parser =====
@@ -509,7 +617,7 @@ fn parse_events_from_buffer(buffer: &[u8]) -> (Vec<KiroEvent>, usize) {
         match std::str::from_utf8(remaining) {
             Ok(valid) => {
                 // All remaining bytes are valid UTF-8
-                for byte in valid.bytes() {
+                for _byte in valid.bytes() {
                     byte_map.push(i);
                     i += 1;
                 }
@@ -712,6 +820,13 @@ fn classify_kiro_event(val: Value) -> KiroEvent {
 
 const CLAUDE_CORRECTION_FACTOR: f64 = 1.15;
 
+const TOOL_DESCRIPTION_MAX_LENGTH: usize = 10000;
+
+/// First-token timeout: how long to wait for the first chunk before retrying
+const FIRST_TOKEN_TIMEOUT_SECS: u64 = 15;
+/// Maximum number of transparent retries on first-token timeout
+const FIRST_TOKEN_MAX_RETRIES: u32 = 3;
+
 fn estimate_tokens(text: &str) -> u32 {
     if text.is_empty() {
         return 0;
@@ -781,6 +896,9 @@ struct AnthropicSseBuilder {
     current_tool: Option<PendingToolCall>,
     completed_tools: Vec<PendingToolCall>,
     has_tool_calls: bool,
+    thinking_parser: ThinkingParser,
+    accumulated_text: String,
+    thinking_block_index: Option<usize>,
 }
 
 impl AnthropicSseBuilder {
@@ -798,6 +916,9 @@ impl AnthropicSseBuilder {
             current_tool: None,
             completed_tools: Vec::new(),
             has_tool_calls: false,
+            thinking_parser: ThinkingParser::new(),
+            accumulated_text: String::new(),
+            thinking_block_index: None,
         }
     }
 
@@ -823,7 +944,7 @@ impl AnthropicSseBuilder {
                     "stop_reason": null,
                     "stop_sequence": null,
                     "usage": {
-                        "input_tokens": 0,
+                        "input_tokens": self.estimated_input_tokens,
                         "output_tokens": 0
                     }
                 }
@@ -913,28 +1034,74 @@ impl AnthropicSseBuilder {
 
         match event {
             KiroEvent::TextDelta(text) => {
-                if !self.in_text_block {
-                    out.push_str(&Self::format_sse(
-                        "content_block_start",
-                        &json!({
-                            "type": "content_block_start",
-                            "index": self.content_index,
-                            "content_block": {"type": "text", "text": ""}
-                        }),
-                    ));
-                    self.in_text_block = true;
+                let events = self.thinking_parser.feed(&text);
+                for tp_event in events {
+                    match tp_event {
+                        ThinkingEvent::ThinkingStart => {
+                            out.push_str(&self.close_text_block());
+                            out.push_str(&Self::format_sse(
+                                "content_block_start",
+                                &json!({
+                                    "type": "content_block_start",
+                                    "index": self.content_index,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": ""
+                                    }
+                                }),
+                            ));
+                            self.thinking_block_index = Some(self.content_index);
+                            self.content_index += 1;
+                        }
+                        ThinkingEvent::ThinkingDelta(thinking_text) => {
+                            if let Some(idx) = self.thinking_block_index {
+                                out.push_str(&Self::format_sse(
+                                    "content_block_delta",
+                                    &json!({
+                                        "type": "content_block_delta",
+                                        "index": idx,
+                                        "delta": {
+                                            "type": "thinking_delta",
+                                            "thinking": thinking_text
+                                        }
+                                    }),
+                                ));
+                            }
+                        }
+                        ThinkingEvent::ThinkingEnd => {
+                            if let Some(idx) = self.thinking_block_index {
+                                out.push_str(&Self::format_sse(
+                                    "content_block_stop",
+                                    &json!({"type": "content_block_stop", "index": idx}),
+                                ));
+                                self.thinking_block_index = None;
+                            }
+                        }
+                        ThinkingEvent::Text(regular_text) => {
+                            self.accumulated_text.push_str(&regular_text);
+                            if !self.in_text_block {
+                                out.push_str(&Self::format_sse(
+                                    "content_block_start",
+                                    &json!({
+                                        "type": "content_block_start",
+                                        "index": self.content_index,
+                                        "content_block": {"type": "text", "text": ""}
+                                    }),
+                                ));
+                                self.in_text_block = true;
+                            }
+                            self.output_char_count += regular_text.len();
+                            out.push_str(&Self::format_sse(
+                                "content_block_delta",
+                                &json!({
+                                    "type": "content_block_delta",
+                                    "index": self.content_index,
+                                    "delta": {"type": "text_delta", "text": regular_text}
+                                }),
+                            ));
+                        }
+                    }
                 }
-
-                self.output_char_count += text.len();
-
-                out.push_str(&Self::format_sse(
-                    "content_block_delta",
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": self.content_index,
-                        "delta": {"type": "text_delta", "text": text}
-                    }),
-                ));
             }
 
             KiroEvent::ToolUseStart { name, tool_use_id } => {
@@ -987,14 +1154,95 @@ impl AnthropicSseBuilder {
     fn finalize(&mut self) -> String {
         let mut out = String::new();
 
-        // Close text block if still open
+        let flush_events = self.thinking_parser.flush();
+        for tp_event in flush_events {
+            match tp_event {
+                ThinkingEvent::ThinkingDelta(text) => {
+                    if let Some(idx) = self.thinking_block_index {
+                        out.push_str(&Self::format_sse(
+                            "content_block_delta",
+                            &json!({
+                                "type": "content_block_delta",
+                                "index": idx,
+                                "delta": {"type": "thinking_delta", "thinking": text}
+                            }),
+                        ));
+                    }
+                }
+                ThinkingEvent::ThinkingEnd => {
+                    if let Some(idx) = self.thinking_block_index {
+                        out.push_str(&Self::format_sse(
+                            "content_block_stop",
+                            &json!({"type": "content_block_stop", "index": idx}),
+                        ));
+                        self.thinking_block_index = None;
+                    }
+                }
+                ThinkingEvent::Text(text) => {
+                    self.accumulated_text.push_str(&text);
+                    if !self.in_text_block {
+                        out.push_str(&Self::format_sse(
+                            "content_block_start",
+                            &json!({
+                                "type": "content_block_start",
+                                "index": self.content_index,
+                                "content_block": {"type": "text", "text": ""}
+                            }),
+                        ));
+                        self.in_text_block = true;
+                    }
+                    self.output_char_count += text.len();
+                    out.push_str(&Self::format_sse(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": self.content_index,
+                            "delta": {"type": "text_delta", "text": text}
+                        }),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         out.push_str(&self.close_text_block());
 
-        // Finalize any in-progress tool call
+        if !self.accumulated_text.is_empty() {
+            let bracket_tools = parse_bracket_tool_calls(&self.accumulated_text);
+            for tool in bracket_tools {
+                self.has_tool_calls = true;
+                out.push_str(&Self::format_sse(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": self.content_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tool.tool_call_id,
+                            "name": tool.name,
+                            "input": {}
+                        }
+                    }),
+                ));
+                let input_str = serde_json::to_string(&tool.arguments).unwrap_or_else(|_| "{}".to_string());
+                out.push_str(&Self::format_sse(
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": self.content_index,
+                        "delta": {"type": "input_json_delta", "partial_json": input_str}
+                    }),
+                ));
+                out.push_str(&Self::format_sse(
+                    "content_block_stop",
+                    &json!({"type": "content_block_stop", "index": self.content_index}),
+                ));
+                self.content_index += 1;
+            }
+        }
+
         self.finalize_current_tool();
 
-        // Emit all accumulated tool calls as complete blocks
-        // (matches gateway: tools are emitted after stream ends)
         out.push_str(&self.emit_tool_blocks());
 
         let input_tokens = if self.total_input_tokens > 0 {
@@ -1049,6 +1297,7 @@ pub async fn handle_kiro_messages(
     account_id: &str,
     trace_id: &str,
     region: &str,
+    profile_arn: Option<&str>,
     concurrency_slot: ConcurrencySlot,
 ) -> Response {
     let fingerprint = get_machine_fingerprint();
@@ -1061,7 +1310,7 @@ pub async fn handle_kiro_messages(
     );
 
     // 1. Convert Anthropic request to Kiro payload
-    let kiro_payload = convert_to_kiro_payload(request);
+    let kiro_payload = convert_to_kiro_payload(request, profile_arn);
 
     debug!(
         "[{}] [Kiro] Payload: {}",
@@ -1097,17 +1346,14 @@ pub async fn handle_kiro_messages(
                         tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                         continue;
                     }
-                    error!("[{}] [Kiro] Request failed after {} attempts: {}", trace_id, MAX_RETRIES, e);
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        axum::Json(json!({
-                            "type": "error",
-                            "error": {
-                                "type": "api_error",
-                                "message": format!("Kiro upstream request failed: {}", e)
-                            }
-                        })),
-                    ).into_response();
+                    let net_error = classify_network_error(&e);
+                    error!("[{}] [Kiro] Request failed after {} attempts: {} (category: {:?})",
+                        trace_id, MAX_RETRIES, e, net_error.category);
+                    return error_response(
+                        StatusCode::from_u16(net_error.suggested_http_status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        AnthropicErrorType::ApiError,
+                        &net_error.user_message,
+                    );
                 }
             };
 
@@ -1138,16 +1384,11 @@ pub async fn handle_kiro_messages(
                     }
                 }
 
-                return (
+                return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(json!({
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": format!("Kiro API 403 (token invalid): {}", error_text)
-                        }
-                    })),
-                ).into_response();
+                    AnthropicErrorType::AuthenticationError,
+                    &format!("Kiro API 403 (token invalid): {}", error_text),
+                );
             }
 
             // 401 — bad credentials, force refresh and retry
@@ -1171,16 +1412,11 @@ pub async fn handle_kiro_messages(
                     }
                 }
 
-                return (
+                return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(json!({
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": format!("Kiro API 401 (bad credentials): {}", error_text)
-                        }
-                    })),
-                ).into_response();
+                    AnthropicErrorType::AuthenticationError,
+                    &format!("Kiro API 401 (bad credentials): {}", error_text),
+                );
             }
 
             // 429 — rate limited, exponential backoff
@@ -1193,16 +1429,11 @@ pub async fn handle_kiro_messages(
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                     continue;
                 }
-                return (
+                return error_response(
                     StatusCode::TOO_MANY_REQUESTS,
-                    axum::Json(json!({
-                        "type": "error",
-                        "error": {
-                            "type": "rate_limit_error",
-                            "message": format!("Kiro API rate limited: {}", error_text)
-                        }
-                    })),
-                ).into_response();
+                    AnthropicErrorType::RateLimitError,
+                    &format!("Kiro API rate limited: {}", error_text),
+                );
             }
 
             // 5xx — server error, exponential backoff
@@ -1215,48 +1446,50 @@ pub async fn handle_kiro_messages(
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                     continue;
                 }
-                return (
+                return error_response(
                     StatusCode::BAD_GATEWAY,
-                    axum::Json(json!({
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": format!("Kiro API error ({}): {}", status.as_u16(), error_text)
-                        }
-                    })),
-                ).into_response();
+                    AnthropicErrorType::ApiError,
+                    &format!("Kiro API error ({}): {}", status.as_u16(), error_text),
+                );
             }
 
-            // Other errors — return immediately
+            // Other errors — attempt to parse Kiro error body and map to user-friendly message
             let error_text = response.text().await.unwrap_or_default();
             error!("[{}] [Kiro] Upstream error {}: {}", trace_id, status.as_u16(), error_text);
-            let mapped_status = match status.as_u16() {
-                400 => StatusCode::BAD_REQUEST,
-                _ => StatusCode::BAD_GATEWAY,
+
+            // Try to extract reason code from Kiro error JSON
+            let error_info = if let Ok(err_json) = serde_json::from_str::<Value>(&error_text) {
+                let reason_code = err_json.get("reasonCode")
+                    .or_else(|| err_json.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("UNKNOWN");
+                let raw_message = err_json.get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&error_text);
+                map_kiro_error(reason_code, raw_message)
+            } else {
+                map_kiro_error("UNKNOWN", &error_text)
             };
-            return (
-                mapped_status,
-                axum::Json(json!({
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": format!("Kiro API error ({}): {}", status.as_u16(), error_text)
-                    }
-                })),
-            ).into_response();
+
+            return error_response(
+                StatusCode::from_u16(error_info.http_status).unwrap_or(StatusCode::BAD_GATEWAY),
+                match error_info.anthropic_error_type.as_str() {
+                    "invalid_request_error" => AnthropicErrorType::InvalidRequestError,
+                    "rate_limit_error" => AnthropicErrorType::RateLimitError,
+                    "authentication_error" => AnthropicErrorType::AuthenticationError,
+                    "overloaded_error" => AnthropicErrorType::OverloadedError,
+                    _ => AnthropicErrorType::ApiError,
+                },
+                &error_info.user_message,
+            );
         }
 
         // Should not reach here, but just in case
-        return (
+        return error_response(
             StatusCode::BAD_GATEWAY,
-            axum::Json(json!({
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": "Kiro upstream request failed after all retries"
-                }
-            })),
-        ).into_response();
+            AnthropicErrorType::ApiError,
+            "Kiro upstream request failed after all retries",
+        );
     };
 
     // 4. Stream the response — parse AWS event stream and convert to Anthropic SSE
@@ -1265,12 +1498,13 @@ pub async fn handle_kiro_messages(
     let estimated_input = estimate_request_tokens(request);
 
     if request.stream {
-        // Streaming mode: convert AWS event stream to Anthropic SSE in real-time
-        let byte_stream = resp.bytes_stream();
+        let retry_client = client.clone();
+        let retry_url = url.clone();
+        let retry_payload = kiro_payload.clone();
+        let retry_token = current_token.clone();
+        let retry_fingerprint = fingerprint.clone();
 
         let sse_stream = async_stream::stream! {
-            // Hold the concurrency slot alive for the entire duration of the stream.
-            // It will be dropped when the stream ends, releasing the slot.
             let _slot_guard = concurrency_slot;
 
             let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
@@ -1278,33 +1512,99 @@ pub async fn handle_kiro_messages(
             let mut chunk_count: usize = 0;
             let mut total_bytes: usize = 0;
 
-            tokio::pin!(byte_stream);
+            let mut retry_count = 0u32;
+            let max_retries = FIRST_TOKEN_MAX_RETRIES;
+            let timeout_duration = tokio::time::Duration::from_secs(FIRST_TOKEN_TIMEOUT_SECS);
 
-            while let Some(chunk_result) = byte_stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
+            let mut byte_stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+                Box::pin(resp.bytes_stream());
+
+            let got_first_token = 'first_token: loop {
+                match tokio::time::timeout(timeout_duration, byte_stream.next()).await {
+                    Ok(Some(Ok(first_chunk))) => {
                         chunk_count += 1;
-                        total_bytes += chunk.len();
-                        buffer.extend_from_slice(&chunk);
+                        total_bytes += first_chunk.len();
+                        buffer.extend_from_slice(&first_chunk);
 
-                        // Parse events from accumulated buffer
                         let (events, consumed) = parse_events_from_buffer(&buffer);
-
-                        // Only drain the consumed portion — preserve incomplete JSON at tail
                         if consumed > 0 {
                             let _ = buffer.split_to(consumed);
                         }
-
                         for event in events {
                             let sse_text = builder.process_event(event);
                             if !sse_text.is_empty() {
                                 yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_text));
                             }
                         }
+
+                        break 'first_token true;
                     }
-                    Err(e) => {
-                        warn!("[{}] [Kiro] Stream chunk error after {} chunks ({} bytes): {}", trace_id_owned, chunk_count, total_bytes, e);
-                        break;
+                    Ok(Some(Err(e))) => {
+                        warn!("[{}] [Kiro] First chunk stream error: {}", trace_id_owned, e);
+                        break 'first_token false;
+                    }
+                    Ok(None) => {
+                        break 'first_token false;
+                    }
+                    Err(_) => {
+                        retry_count += 1;
+                        if retry_count > max_retries {
+                            warn!("[{}] [Kiro] First token timeout after {} retries", trace_id_owned, max_retries);
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(
+                                AnthropicSseBuilder::format_sse("error", &json!({
+                                    "type": "error",
+                                    "error": {"type": "api_error", "message": "First token timeout after retries"}
+                                }))
+                            ));
+                            return;
+                        }
+                        warn!("[{}] [Kiro] First token timeout (attempt {}/{}), retrying...",
+                            trace_id_owned, retry_count, max_retries);
+
+                        let headers = get_kiro_headers(&retry_token, &retry_fingerprint);
+                        match retry_client.post(&retry_url).headers(headers).json(&retry_payload).send().await {
+                            Ok(new_resp) if new_resp.status().is_success() => {
+                                byte_stream = Box::pin(new_resp.bytes_stream());
+                                continue 'first_token;
+                            }
+                            Ok(new_resp) => {
+                                warn!("[{}] [Kiro] Retry request returned status {}", trace_id_owned, new_resp.status());
+                                byte_stream = Box::pin(new_resp.bytes_stream());
+                                break 'first_token false;
+                            }
+                            Err(e) => {
+                                warn!("[{}] [Kiro] Retry request failed: {}", trace_id_owned, e);
+                                break 'first_token false;
+                            }
+                        }
+                    }
+                }
+            };
+
+            if got_first_token {
+                while let Some(chunk_result) = byte_stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            chunk_count += 1;
+                            total_bytes += chunk.len();
+                            buffer.extend_from_slice(&chunk);
+
+                            let (events, consumed) = parse_events_from_buffer(&buffer);
+                            if consumed > 0 {
+                                let _ = buffer.split_to(consumed);
+                            }
+
+                            for event in events {
+                                let sse_text = builder.process_event(event);
+                                if !sse_text.is_empty() {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_text));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("[{}] [Kiro] Stream chunk error after {} chunks ({} bytes): {}", trace_id_owned, chunk_count, total_bytes, e);
+                            break;
+                        }
                     }
                 }
             }
@@ -1312,7 +1612,6 @@ pub async fn handle_kiro_messages(
             info!("[{}] [Kiro] Stream ended normally after {} chunks, {} bytes, {} chars output",
                 trace_id_owned, chunk_count, total_bytes, builder.output_char_count);
 
-            // Finalize the stream
             let final_sse = builder.finalize();
             if !final_sse.is_empty() {
                 yield Ok::<Bytes, std::io::Error>(Bytes::from(final_sse));
@@ -1337,8 +1636,11 @@ pub async fn handle_kiro_messages(
             Ok(b) => b,
             Err(e) => {
                 error!("[{}] [Kiro] Failed to read response body: {}", trace_id, e);
-                return (StatusCode::BAD_GATEWAY, format!("Failed to read Kiro response: {}", e))
-                    .into_response();
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    AnthropicErrorType::ApiError,
+                    &format!("Failed to read Kiro response: {}", e),
+                );
             }
         };
 
@@ -1398,5 +1700,151 @@ pub async fn handle_kiro_messages(
             .header("X-Kiro-Upstream", "true")
             .body(Body::from(serde_json::to_string(&response_json).unwrap()))
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Property 3: SSE Thinking block output format
+    #[test]
+    fn prop_sse_thinking_block_format() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thinking>test content</thinking>normal text".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        assert!(
+            combined.contains("\"type\":\"thinking\"")
+                || combined.contains("\"type\": \"thinking\"")
+        );
+        assert!(combined.contains("thinking_delta"));
+        assert!(combined.contains("content_block_stop"));
+        assert!(combined.contains("normal text"));
+    }
+
+    // Property 6: Truncation recovery message injection
+    #[test]
+    fn prop_truncation_recovery_message_format() {
+        use crate::proxy::upstream::truncation::{
+            generate_content_truncation_message, generate_tool_truncation_message,
+        };
+        let tool_msg = generate_tool_truncation_message("tool_123", "Write");
+        assert!(tool_msg.contains("[API Limitation]"));
+        assert!(tool_msg.contains("truncated"));
+
+        let content_msg = generate_content_truncation_message();
+        assert!(content_msg.contains("[System Notice]"));
+        assert!(content_msg.contains("truncated"));
+    }
+
+    // Property 12: Tool description truncation
+    #[test]
+    fn prop_tool_description_truncation() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let long_desc = "a".repeat(5000);
+        let tools = vec![Tool {
+            type_: None,
+            name: Some("test_tool".to_string()),
+            description: Some(long_desc.clone()),
+            input_schema: Some(json!({"type": "object"})),
+        }];
+        let specs = build_tool_specifications(&tools, 4096);
+        let spec = &specs[0];
+        let desc = spec["toolSpecification"]["description"].as_str().unwrap();
+        assert_eq!(desc.len(), 4096);
+
+        let short_tools = vec![Tool {
+            type_: None,
+            name: Some("test_tool".to_string()),
+            description: Some("short desc".to_string()),
+            input_schema: Some(json!({"type": "object"})),
+        }];
+        let specs2 = build_tool_specifications(&short_tools, 4096);
+        let desc2 = specs2[0]["toolSpecification"]["description"]
+            .as_str()
+            .unwrap();
+        assert_eq!(desc2, "short desc");
+    }
+
+    // Property 13: Image content conversion
+    #[test]
+    fn prop_image_content_in_extract_text() {
+        use crate::proxy::mappers::claude::models::{ImageSource, MessageContent};
+        let content = MessageContent::Array(vec![
+            ContentBlock::Text {
+                text: "before".to_string(),
+            },
+            ContentBlock::Image {
+                source: ImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: "image/png".to_string(),
+                    data: "abc123".to_string(),
+                },
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: "after".to_string(),
+            },
+        ]);
+        let text = extract_text(&content);
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(text.contains("image/png"));
+    }
+
+    #[test]
+    fn test_merge_adjacent_messages() {
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "hello"}),
+            serde_json::json!({"role": "user", "content": "world"}),
+            serde_json::json!({"role": "assistant", "content": "hi"}),
+            serde_json::json!({"role": "assistant", "content": "there"}),
+            serde_json::json!({"role": "user", "content": "bye"}),
+        ];
+        let merged = merge_adjacent_messages(messages);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["content"], "hello\nworld");
+        assert_eq!(merged[1]["content"], "hi\nthere");
+        assert_eq!(merged[2]["content"], "bye");
+    }
+
+    #[test]
+    fn test_merge_adjacent_empty() {
+        let merged = merge_adjacent_messages(vec![]);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_adjacent_no_merges() {
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "a"}),
+            serde_json::json!({"role": "assistant", "content": "b"}),
+            serde_json::json!({"role": "user", "content": "c"}),
+        ];
+        let merged = merge_adjacent_messages(messages);
+        assert_eq!(merged.len(), 3);
+    }
+
+    // Property 21: Incomplete stream truncation detection
+    #[test]
+    fn prop_incomplete_stream_truncation() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100);
+        let _ = builder.process_event(KiroEvent::ToolUseStart {
+            name: "test_tool".to_string(),
+            tool_use_id: "tool_123".to_string(),
+        });
+        let _ = builder.process_event(KiroEvent::ToolInputDelta(
+            "{\"key\":\"value\"}".to_string(),
+        ));
+        let final_out = builder.finalize();
+
+        assert!(builder.has_tool_calls);
+        assert!(final_out.contains("tool_use"));
+        assert!(final_out.contains("test_tool"));
     }
 }

@@ -251,3 +251,101 @@ pub struct Usage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property 15: ContentBlock::Text serde roundtrip.
+        #[test]
+        fn prop_content_block_text_roundtrip(text in "[a-zA-Z0-9 ]{0,100}") {
+            let block = ContentBlock::Text { text: text.clone() };
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            match back {
+                ContentBlock::Text { text: t } => prop_assert_eq!(t, text),
+                _ => prop_assert!(false, "wrong variant"),
+            }
+        }
+
+        #[test]
+        fn prop_content_block_thinking_roundtrip(
+            thinking in "[a-zA-Z0-9 ]{0,100}",
+        ) {
+            let block = ContentBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: Some("sig123".into()),
+                cache_control: None,
+            };
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            match back {
+                ContentBlock::Thinking { thinking: t, signature: s, .. } => {
+                    prop_assert_eq!(t, thinking);
+                    prop_assert_eq!(s.unwrap(), "sig123");
+                }
+                _ => prop_assert!(false, "wrong variant"),
+            }
+        }
+
+        #[test]
+        fn prop_content_block_tool_use_roundtrip(
+            name in "[a-zA-Z][a-zA-Z0-9_]{0,20}",
+            key in "[a-zA-Z]{1,10}",
+            val in "[a-zA-Z0-9]{0,20}",
+        ) {
+            let block = ContentBlock::ToolUse {
+                id: "toolu_abc123".into(),
+                name: name.clone(),
+                input: serde_json::json!({key.clone(): val.clone()}),
+                signature: None,
+                cache_control: None,
+            };
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            match back {
+                ContentBlock::ToolUse { id, name: n, input, .. } => {
+                    prop_assert_eq!(id, "toolu_abc123");
+                    prop_assert_eq!(n, name);
+                    prop_assert_eq!(input[&key].as_str().unwrap(), val.as_str());
+                }
+                _ => prop_assert!(false, "wrong variant"),
+            }
+        }
+
+        #[test]
+        fn prop_content_block_tool_result_roundtrip(
+            tool_use_id in "[a-zA-Z0-9_]{1,30}",
+            content_str in "[a-zA-Z0-9 ]{0,50}",
+        ) {
+            let block = ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: serde_json::Value::String(content_str.clone()),
+                is_error: Some(false),
+            };
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            match back {
+                ContentBlock::ToolResult { tool_use_id: tid, content, is_error } => {
+                    prop_assert_eq!(tid, tool_use_id);
+                    prop_assert_eq!(content.as_str().unwrap(), content_str.as_str());
+                    prop_assert_eq!(is_error, Some(false));
+                }
+                _ => prop_assert!(false, "wrong variant"),
+            }
+        }
+
+        #[test]
+        fn prop_content_block_redacted_thinking_roundtrip(data in "[a-zA-Z0-9]{0,50}") {
+            let block = ContentBlock::RedactedThinking { data: data.clone() };
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            match back {
+                ContentBlock::RedactedThinking { data: d } => prop_assert_eq!(d, data),
+                _ => prop_assert!(false, "wrong variant"),
+            }
+        }
+    }
+}
