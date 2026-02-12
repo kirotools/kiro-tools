@@ -36,6 +36,25 @@ pkill -f kiro-tools
 lsof -ti:8045 | xargs kill
 ```
 
+## Deb 安装
+
+```bash
+# 下载并安装
+sudo dpkg -i kiro-tools_*_amd64.deb
+
+# 启动服务
+sudo systemctl start kiro-tools
+sudo systemctl enable kiro-tools   # 开机自启
+
+# 查看状态
+sudo systemctl status kiro-tools
+
+# 查看日志
+journalctl -u kiro-tools -f
+```
+
+安装后二进制位于 `/usr/bin/kiro-tools`，前端文件位于 `/usr/share/kiro-tools/dist`。
+
 ## Docker
 
 ```bash

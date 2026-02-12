@@ -32,7 +32,7 @@ jobs:
         working-directory: webui
         run: npm install --legacy-peer-deps && npm run build
 
-      - name: Package
+      - name: Package tarball
         run: |
           mkdir -p release/kiro-tools-linux-amd64
           cp target/release/kiro-tools release/kiro-tools-linux-amd64/
@@ -40,11 +40,62 @@ jobs:
           cp README.md LICENSE Dockerfile release/kiro-tools-linux-amd64/
           cd release && tar czf kiro-tools-linux-amd64.tar.gz kiro-tools-linux-amd64
 
-      - name: Upload artifact
+      - name: Package deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+          PKG_DIR="release/deb/kiro-tools_${VERSION}_amd64"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/share/kiro-tools/dist"
+          mkdir -p "${PKG_DIR}/lib/systemd/system"
+
+          cp target/release/kiro-tools "${PKG_DIR}/usr/bin/"
+          cp -r webui/dist/* "${PKG_DIR}/usr/share/kiro-tools/dist/"
+
+          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          Package: kiro-tools
+          Version: ${VERSION}
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: you
+          Description: Kiro Tools - Anthropic compatible proxy with multi-account rotation
+          EOF
+          # 去掉 heredoc 缩进
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+
+          cat > "${PKG_DIR}/lib/systemd/system/kiro-tools.service" << EOF
+          [Unit]
+          Description=Kiro Tools Proxy Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          Environment=KIRO_DIST_PATH=/usr/share/kiro-tools/dist
+          ExecStart=/usr/bin/kiro-tools
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sed -i 's/^          //' "${PKG_DIR}/lib/systemd/system/kiro-tools.service"
+
+          dpkg-deb --build "${PKG_DIR}"
+          mv "release/deb/kiro-tools_${VERSION}_amd64.deb" release/
+
+      - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
-          name: kiro-tools-linux-amd64
+          name: kiro-tools-linux-amd64-tarball
           path: release/kiro-tools-linux-amd64.tar.gz
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiro-tools-linux-amd64-deb
+          path: release/*.deb
 
   publish:
     needs: build
@@ -68,7 +119,7 @@ jobs:
           name: "Kiro Tools ${{ github.ref_name }}"
           body: "See [README](README.md) for usage."
           token: ${{ secrets.GITHUB_TOKEN }}
-          artifacts: "artifacts/**/*.tar.gz"
+          artifacts: "artifacts/**/*.tar.gz,artifacts/**/*.deb"
           artifactErrorsFailBuild: false
           replacesArtifacts: true
           makeLatest: legacy
