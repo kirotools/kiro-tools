@@ -89,14 +89,14 @@ async fn create_client() -> Result<reqwest::Client, String> {
 
     // Load config to check for upstream proxy
     if let Ok(config) = crate::modules::config::load_app_config() {
-        if config.proxy.upstream_proxy.enabled && !config.proxy.upstream_proxy.url.is_empty() {
-            logger::log_info(&format!("Update checker using upstream proxy: {}", config.proxy.upstream_proxy.url));
-            match reqwest::Proxy::all(&config.proxy.upstream_proxy.url) {
+        if !config.proxy.upstream_proxy.custom_proxy_url.is_empty() {
+            logger::log_info(&format!("Update checker using upstream proxy: {}", config.proxy.upstream_proxy.custom_proxy_url));
+            match reqwest::Proxy::all(&config.proxy.upstream_proxy.custom_proxy_url) {
                 Ok(proxy) => {
                     builder = builder.proxy(proxy);
                 },
                 Err(e) => {
-                    logger::log_warn(&format!("Failed to parse proxy URL '{}': {}", config.proxy.upstream_proxy.url, e));
+                    logger::log_warn(&format!("Failed to parse proxy URL '{}': {}", config.proxy.upstream_proxy.custom_proxy_url, e));
                 }
             }
         }

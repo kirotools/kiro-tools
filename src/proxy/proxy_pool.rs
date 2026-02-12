@@ -106,9 +106,9 @@ impl ProxyPoolManager {
             // Fallback 到应用配置的单上游代理
             if let Ok(app_cfg) = crate::modules::config::load_app_config() {
                 let up = app_cfg.proxy.upstream_proxy;
-                if up.enabled && !up.url.is_empty() {
-                    if let Ok(p) = reqwest::Proxy::all(&up.url) {
-                        tracing::info!("[Proxy] Route: {:?} -> Upstream: {} (AppConfig)", account_id.unwrap_or("Generic"), up.url);
+                if !up.custom_proxy_url.is_empty() {
+                    if let Ok(p) = reqwest::Proxy::all(&up.custom_proxy_url) {
+                        tracing::info!("[Proxy] Route: {:?} -> Upstream: {} (AppConfig)", account_id.unwrap_or("Generic"), up.custom_proxy_url);
                         builder = builder.proxy(p);
                     }
                 } else {

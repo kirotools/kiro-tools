@@ -10,6 +10,7 @@ use tracing::info;
 
 use crate::proxy::mappers::claude::models::ClaudeRequest;
 use crate::proxy::server::AppState;
+use crate::proxy::token_manager::ConcurrencySlot;
 use axum::http::HeaderMap;
 
 pub async fn handle_messages(
@@ -65,6 +66,24 @@ pub async fn handle_messages(
                     "error": {
                         "type": "overloaded_error",
                         "message": format!("No available accounts: {}", e)
+                    }
+                }))
+            ).into_response();
+        }
+    };
+
+    let _concurrency_slot: ConcurrencySlot = match token_manager
+        .try_acquire_slot(&account_id)
+    {
+        Some(slot) => slot,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": "Account concurrency limit reached. Please retry."
                     }
                 }))
             ).into_response();

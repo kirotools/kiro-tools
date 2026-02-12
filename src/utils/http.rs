@@ -12,17 +12,21 @@ fn create_base_client(timeout_secs: u64) -> Client {
 
     if let Ok(config) = load_app_config() {
         let proxy_config = config.proxy.upstream_proxy;
-        if proxy_config.enabled && !proxy_config.url.is_empty() {
-            match Proxy::all(&proxy_config.url) {
+        if !proxy_config.custom_proxy_url.is_empty() {
+            match Proxy::all(&proxy_config.custom_proxy_url) {
                 Ok(proxy) => {
                     builder = builder.proxy(proxy);
                     tracing::info!(
                         "HTTP shared client enabled upstream proxy: {}",
-                        proxy_config.url
+                        proxy_config.custom_proxy_url
                     );
                 }
                 Err(e) => {
-                    tracing::error!("invalid_proxy_url: {}, error: {}", proxy_config.url, e);
+                    tracing::error!(
+                        "invalid_proxy_url: {}, error: {}",
+                        proxy_config.custom_proxy_url,
+                        e
+                    );
                 }
             }
         }

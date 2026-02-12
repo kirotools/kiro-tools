@@ -373,8 +373,8 @@ pub async fn fetch_legacy_provider_models(
 
     let mut builder =
         reqwest::Client::builder().timeout(Duration::from_secs(request_timeout.max(5)));
-    if upstream_proxy.enabled && !upstream_proxy.url.is_empty() {
-        let proxy = reqwest::Proxy::all(&upstream_proxy.url)
+    if !upstream_proxy.custom_proxy_url.is_empty() {
+        let proxy = reqwest::Proxy::all(&upstream_proxy.custom_proxy_url)
             .map_err(|e| format!("Invalid upstream proxy url: {}", e))?;
         builder = builder.proxy(proxy);
     }
