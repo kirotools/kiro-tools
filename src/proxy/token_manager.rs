@@ -949,7 +949,7 @@ impl TokenManager {
                                 token.timestamp = entry.timestamp;
                             }
                         } else {
-                            match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), None, Some(&token.account_id))
+                            match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), Some(token.account_path.to_str().unwrap_or("")), Some(&token.account_id))
                                 .await
                             {
                                 Ok(token_response) => {
@@ -1294,7 +1294,7 @@ impl TokenManager {
                     tracing::debug!("Token already refreshed by another request, using cached token");
                 } else {
                     // 调用 OAuth 刷新 token
-                    match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), None, Some(&token.account_id)).await {
+                    match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), Some(token.account_path.to_str().unwrap_or("")), Some(&token.account_id)).await {
                         Ok(token_response) => {
                             tracing::debug!("Token 刷新成功！");
 
@@ -1503,6 +1503,7 @@ impl TokenManager {
                         token.expires_in,
                         chrono::Utc::now().timestamp(),
                         token.project_id.clone(),
+                        token.account_path.to_str().unwrap_or("").to_string(),
                     ));
                     break;
                 }
@@ -1518,6 +1519,7 @@ impl TokenManager {
             expires_in,
             now,
             project_id_opt,
+            account_path,
         ) = match token_info {
             Some(info) => info,
             None => return Err(format!("未找到账号: {}", email)),
@@ -1533,7 +1535,7 @@ impl TokenManager {
         tracing::info!("Token for {} is expiring, refreshing...", email);
 
         // 调用 OAuth 刷新 token
-        match crate::modules::oauth::refresh_access_token(Some(&refresh_token), None, Some(&account_id)).await {
+        match crate::modules::oauth::refresh_access_token(Some(&refresh_token), Some(&account_path), Some(&account_id)).await {
             Ok(token_response) => {
                 tracing::info!("Token refresh successful for {}", email);
                 let new_now = chrono::Utc::now().timestamp();
