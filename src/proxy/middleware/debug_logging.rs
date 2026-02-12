@@ -38,7 +38,7 @@ pub async fn debug_logging_middleware(
     };
 
     let debug_dir = std::env::var("KIRO_DEBUG_DIR")
-        .unwrap_or_else(|_| "/tmp/kiro-debug".to_string());
+        .unwrap_or_else(|_| std::env::temp_dir().join("kiro-debug").to_string_lossy().to_string());
     let logger = DebugLogger::new(debug_mode, std::path::PathBuf::from(debug_dir));
 
     // Generate a short trace ID for correlating request/response files

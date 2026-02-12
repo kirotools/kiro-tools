@@ -32,7 +32,7 @@ pub async fn handle_messages(
     let debug_logger = DebugLogger::new(
         debug_mode,
         std::path::PathBuf::from(
-            std::env::var("KIRO_DEBUG_DIR").unwrap_or_else(|_| "/tmp/kiro-debug".to_string())
+            std::env::var("KIRO_DEBUG_DIR").unwrap_or_else(|_| std::env::temp_dir().join("kiro-debug").to_string_lossy().to_string())
         ),
     );
 
