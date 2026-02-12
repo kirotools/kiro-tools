@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Lock, Key, Globe, AlertCircle, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { isTauri } from '../../utils/env';
 
 /**
  * AdminAuthGuard
@@ -10,15 +9,13 @@ import { isTauri } from '../../utils/env';
  */
 export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const { t, i18n } = useTranslation();
-    const [isAuthenticated, setIsAuthenticated] = useState(isTauri());
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [apiKey, setApiKey] = useState('');
     const [showLangMenu, setShowLangMenu] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
 
     useEffect(() => {
-        if (isTauri()) return;
-
         // 检查 Session 存储 (优先)
         const sessionKey = sessionStorage.getItem('abv_admin_api_key');
         if (sessionKey) {
@@ -75,7 +72,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                 localStorage.removeItem('abv_admin_api_key');
                 setIsAuthenticated(true);
                 window.location.reload();
-            } else if (response.status === 401) {
+            } else if (response.status === 401 || response.status === 403) {
                 // 密码错误
                 sessionStorage.removeItem('abv_admin_api_key');
                 setError(t('login.error_invalid_key'));
