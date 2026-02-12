@@ -2296,8 +2296,11 @@ impl TokenManager {
 
     /// 设置每个账号的最大并发数
     pub fn set_max_concurrency(&self, max: usize) {
-        self.max_concurrency_per_account.store(max.max(1), Ordering::Relaxed);
-        tracing::info!("设置单账号最大并发数为: {}", max.max(1));
+        let new_max = max.max(1);
+        self.max_concurrency_per_account.store(new_max, Ordering::Relaxed);
+        // Clear cached semaphores so they get recreated with the new limit
+        self.concurrency_slots.clear();
+        tracing::info!("设置单账号最大并发数为: {}", new_max);
     }
 
     /// 获取当前每个账号的最大并发数
@@ -3513,6 +3516,181 @@ mod tests {
         let refresh_performed = results.iter().filter(|&&r| r).count();
         assert_eq!(refresh_performed, 1, "Only one concurrent request should perform the actual refresh");
         assert_eq!(refresh_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ===== Concurrency Slot Queuing & set_max_concurrency Tests =====
+
+    #[tokio::test]
+    async fn test_set_max_concurrency_clears_cached_semaphores() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-clear-sema-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+
+        // TokenManager::new() defaults to 1
+        let slot1 = manager.try_acquire_slot("acc1");
+        assert!(slot1.is_some());
+        let slot2 = manager.try_acquire_slot("acc1");
+        assert!(slot2.is_none(), "Should fail with default concurrency of 1");
+
+        drop(slot1);
+
+        // Increase to 3
+        manager.set_max_concurrency(3);
+
+        // Old semaphores should be cleared, new ones created with limit 3
+        let s1 = manager.try_acquire_slot("acc1");
+        let s2 = manager.try_acquire_slot("acc1");
+        let s3 = manager.try_acquire_slot("acc1");
+        assert!(s1.is_some());
+        assert!(s2.is_some());
+        assert!(s3.is_some(), "Should succeed after increasing concurrency to 3");
+
+        let s4 = manager.try_acquire_slot("acc1");
+        assert!(s4.is_none(), "Fourth should fail with concurrency of 3");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_set_max_concurrency_minimum_is_one() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-min-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+
+        // Try to set 0 — should clamp to 1
+        manager.set_max_concurrency(0);
+        assert_eq!(manager.get_max_concurrency(), 1);
+
+        let slot = manager.try_acquire_slot("acc1");
+        assert!(slot.is_some());
+        let slot2 = manager.try_acquire_slot("acc1");
+        assert!(slot2.is_none(), "Should only allow 1 with min clamp");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_acquire_slot_with_timeout_waits_for_release() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-wait-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = Arc::new(TokenManager::new(tmp.clone()));
+
+        // Set concurrency to 1
+        manager.set_max_concurrency(1);
+
+        // Acquire the only slot
+        let slot = manager.try_acquire_slot("acc1").unwrap();
+
+        let manager2 = manager.clone();
+        let start = std::time::Instant::now();
+
+        // Spawn a task that waits for the slot
+        let handle = tokio::spawn(async move {
+            manager2
+                .acquire_slot_with_timeout("acc1", std::time::Duration::from_secs(5))
+                .await
+        });
+
+        // Release after 100ms
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        drop(slot);
+
+        let result = handle.await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(result.is_some(), "Should acquire slot after waiting");
+        assert!(elapsed.as_millis() >= 80, "Should have waited ~100ms, got {}ms", elapsed.as_millis());
+        assert!(elapsed.as_millis() < 2000, "Should not have waited too long, got {}ms", elapsed.as_millis());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_acquire_slot_with_timeout_queues_multiple_waiters() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-queue-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = Arc::new(TokenManager::new(tmp.clone()));
+
+        // Set concurrency to 1
+        manager.set_max_concurrency(1);
+
+        // Acquire the only slot
+        let slot = manager.try_acquire_slot("acc1").unwrap();
+
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        // Spawn 3 waiters
+        for _ in 0..3 {
+            let mgr = manager.clone();
+            let done = completed.clone();
+            handles.push(tokio::spawn(async move {
+                let acquired = mgr
+                    .acquire_slot_with_timeout("acc1", std::time::Duration::from_secs(5))
+                    .await;
+                if acquired.is_some() {
+                    // Hold briefly then release
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                    done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                acquired.is_some()
+            }));
+        }
+
+        // Release the initial slot after 50ms
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        drop(slot);
+
+        let results: Vec<bool> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // All 3 should eventually get their turn
+        assert_eq!(results.iter().filter(|&&r| r).count(), 3, "All waiters should eventually acquire the slot");
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_acquire_slot_timeout_expires() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+
+        manager.set_max_concurrency(1);
+
+        // Hold the slot indefinitely
+        let _slot = manager.try_acquire_slot("acc1").unwrap();
+
+        // Try to acquire with very short timeout
+        let result = manager
+            .acquire_slot_with_timeout("acc1", std::time::Duration::from_millis(100))
+            .await;
+
+        assert!(result.is_none(), "Should timeout when slot is held");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_different_accounts_independent() {
+        let tmp = std::env::temp_dir().join(format!("kiro-conc-indep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let manager = TokenManager::new(tmp.clone());
+
+        manager.set_max_concurrency(1);
+
+        // acc1 slot taken
+        let _slot1 = manager.try_acquire_slot("acc1").unwrap();
+
+        // acc2 should still be available — independent semaphores
+        let slot2 = manager.try_acquire_slot("acc2");
+        assert!(slot2.is_some(), "Different accounts should have independent concurrency slots");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

@@ -73,7 +73,8 @@ pub async fn handle_messages(
     };
 
     let _concurrency_slot: ConcurrencySlot = match token_manager
-        .try_acquire_slot(&account_id)
+        .acquire_slot_with_timeout(&account_id, std::time::Duration::from_secs(30))
+        .await
     {
         Some(slot) => slot,
         None => {
@@ -83,7 +84,7 @@ pub async fn handle_messages(
                     "type": "error",
                     "error": {
                         "type": "overloaded_error",
-                        "message": "Account concurrency limit reached. Please retry."
+                        "message": "Account concurrency limit reached after waiting 30s."
                     }
                 }))
             ).into_response();

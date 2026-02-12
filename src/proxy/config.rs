@@ -532,7 +532,7 @@ pub struct ProxyConfig {
 }
 
 fn default_max_concurrency_per_account() -> usize {
-    1 // 默认并发为1
+    2 // 默认并发为2，支持同时处理主对话和辅助请求(如标题生成)
 }
 
 impl Default for ProxyConfig {
