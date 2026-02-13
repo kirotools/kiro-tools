@@ -65,20 +65,23 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
                         if (Array.isArray(parsed)) {
                             tokens = parsed
                                 .map((item: any) => item.refresh_token || item.refreshToken)
-                                .filter((t: any) => typeof t === 'string' && t.startsWith('1//'));
+                                .filter((t: any) => typeof t === 'string' && t.length > 20);
                         }
                     }
                 } catch (e) {
                     console.debug('JSON parse failed, falling back to regex', e);
                 }
 
-                // Try regex extraction
                 if (tokens.length === 0) {
-                    const regex = /1\/\/[a-zA-Z0-9_\-]+/g;
-                    const matches = input.match(regex);
+                    const kiroTokenRegex = /aor[A-Za-z0-9+\/=:\-_]+/g;
+                    const matches = input.match(kiroTokenRegex);
                     if (matches) {
                         tokens = matches;
                     }
+                }
+                
+                if (tokens.length === 0 && input.length > 20 && !input.includes(' ') && !input.includes('\n')) {
+                    tokens = [input];
                 }
 
                 tokens = [...new Set(tokens)];
