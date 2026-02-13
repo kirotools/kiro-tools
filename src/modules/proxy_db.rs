@@ -8,29 +8,28 @@ pub fn get_proxy_db_path() -> Result<PathBuf, String> {
     Ok(data_dir.join("proxy_logs.db"))
 }
 
-fn connect_db() -> Result<Connection, String> {
-    let db_path = get_proxy_db_path()?;
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-
-    // Enable WAL mode for better concurrency
+fn apply_pragmas(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
-
-    // Set busy timeout to 5000ms to avoid "database is locked" errors
     conn.pragma_update(None, "busy_timeout", 5000)
         .map_err(|e| e.to_string())?;
-
-    // Synchronous NORMAL is faster and safe enough for WAL
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
+fn connect_db_at_path(db_path: PathBuf) -> Result<Connection, String> {
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    apply_pragmas(&conn)?;
     Ok(conn)
 }
 
-pub fn init_db() -> Result<(), String> {
-    // connect_db will initialize WAL mode and other pragmas
-    let conn = connect_db()?;
+fn connect_db() -> Result<Connection, String> {
+    let db_path = get_proxy_db_path()?;
+    connect_db_at_path(db_path)
+}
 
+fn init_db_with_conn(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS request_logs (
             id TEXT PRIMARY KEY,
@@ -46,7 +45,6 @@ pub fn init_db() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // Try to add new columns (ignore errors if they exist)
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN request_body TEXT", []);
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN response_body TEXT", []);
     let _ = conn.execute(
@@ -77,7 +75,6 @@ pub fn init_db() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // Add status index for faster stats queries
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_status ON request_logs (status)",
         [],
@@ -87,8 +84,14 @@ pub fn init_db() -> Result<(), String> {
     Ok(())
 }
 
-pub fn clear_stale_pending_logs() -> Result<usize, String> {
+pub fn init_db() -> Result<(), String> {
+    // connect_db will initialize WAL mode and other pragmas
     let conn = connect_db()?;
+
+    init_db_with_conn(&conn)
+}
+
+fn clear_stale_pending_logs_with_conn(conn: &Connection) -> Result<usize, String> {
     conn.execute(
         "UPDATE request_logs SET status = 503, error = COALESCE(error, 'Aborted: server restarted') WHERE status = 0",
         [],
@@ -96,9 +99,12 @@ pub fn clear_stale_pending_logs() -> Result<usize, String> {
     .map_err(|e| e.to_string())
 }
 
-pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
+pub fn clear_stale_pending_logs() -> Result<usize, String> {
     let conn = connect_db()?;
+    clear_stale_pending_logs_with_conn(&conn)
+}
 
+fn save_log_with_conn(conn: &Connection, log: &ProxyRequestLog) -> Result<(), String> {
     conn.execute(
         "INSERT INTO request_logs (id, timestamp, method, url, status, duration, model, error, request_body, response_body, input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, cache_creation_input_tokens, cache_read_input_tokens)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
@@ -123,9 +129,14 @@ pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
             log.cache_creation_input_tokens,
             log.cache_read_input_tokens,
         ],
-    ).map_err(|e| e.to_string())?;
-
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
+    let conn = connect_db()?;
+    save_log_with_conn(&conn, log)
 }
 /// Update an existing log entry (used for pending -> completed transitions)
 pub fn update_log(log: &ProxyRequestLog) -> Result<(), String> {
@@ -230,9 +241,10 @@ mod tests {
         let tmp_root =
             std::env::temp_dir().join(format!("kiro-proxy-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_root).unwrap();
-        std::env::set_var("KIRO_DATA_DIR", tmp_root.to_string_lossy().to_string());
 
-        init_db().unwrap();
+        let db_path = tmp_root.join("proxy_logs.db");
+        let conn = connect_db_at_path(db_path).unwrap();
+        init_db_with_conn(&conn).unwrap();
 
         let pending = ProxyRequestLog {
             id: "log1".to_string(),
@@ -255,12 +267,11 @@ mod tests {
             protocol: Some("anthropic".to_string()),
             username: None,
         };
-        save_log(&pending).unwrap();
+        save_log_with_conn(&conn, &pending).unwrap();
 
-        let updated = clear_stale_pending_logs().unwrap();
+        let updated = clear_stale_pending_logs_with_conn(&conn).unwrap();
         assert_eq!(updated, 1);
 
-        let conn = connect_db().unwrap();
         let status: i64 = conn
             .query_row(
                 "SELECT status FROM request_logs WHERE id = ?1",
@@ -270,7 +281,6 @@ mod tests {
             .unwrap();
         assert_ne!(status, 0);
 
-        std::env::remove_var("KIRO_DATA_DIR");
         std::fs::remove_dir_all(&tmp_root).ok();
     }
 }

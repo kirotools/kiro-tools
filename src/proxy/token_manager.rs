@@ -86,6 +86,35 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
+    async fn load_account_from_path(path: &PathBuf) -> Result<crate::models::Account, String> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("failed_to_read_account_data: {}", e))?;
+        let mut account: crate::models::Account = serde_json::from_str(&content)
+            .map_err(|e| format!("failed_to_parse_account_data: {}", e))?;
+        if account.encrypted {
+            account.decrypt_tokens()?;
+        }
+        Ok(account)
+    }
+
+    fn save_account_to_path(path: &PathBuf, account: &crate::models::Account) -> Result<(), String> {
+        let mut account_to_save = account.clone();
+        account_to_save.encrypt_tokens()?;
+        let content = serde_json::to_string_pretty(&account_to_save)
+            .map_err(|e| format!("failed_to_serialize_account_data: {}", e))?;
+        std::fs::write(path, content).map_err(|e| format!("failed_to_save_account_data: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("failed_to_set_file_permissions: {}", e))?;
+        }
+
+        Ok(())
+    }
+
     /// 创建新的 TokenManager
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
@@ -337,7 +366,8 @@ impl TokenManager {
             .and_then(|s| s.to_str())
             .ok_or("Invalid account file name")?;
 
-        let account = crate::modules::account::load_account(account_id)
+        let account = Self::load_account_from_path(path)
+            .await
             .map_err(|e| format!("Failed to load account {}: {}", account_id, e))?;
 
         if account.proxy_disabled {
@@ -370,7 +400,7 @@ impl TokenManager {
                 updated_account.validation_blocked_until = None;
                 updated_account.validation_blocked_reason = None;
                 
-                if let Err(e) = crate::modules::account::save_account(&updated_account) {
+                if let Err(e) = Self::save_account_to_path(path, &updated_account) {
                     tracing::warn!("Failed to clear validation block: {}", e);
                 }
                 
@@ -1389,7 +1419,7 @@ impl TokenManager {
 
         tracing::debug!("已保存刷新后的 token 到账号 {}", account_id);
 
-        if let Ok(account) = crate::modules::account::load_account(account_id) {
+        if let Ok(account) = Self::load_account_from_path(&entry.account_path).await {
             if let Err(e) = crate::modules::account::save_credentials_to_source_file(&account) {
                 tracing::warn!("Failed to sync credentials to source file: {}", e);
             }
