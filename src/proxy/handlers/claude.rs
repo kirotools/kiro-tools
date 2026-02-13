@@ -120,7 +120,7 @@ pub async fn handle_messages(
             timestamp: chrono::Utc::now().timestamp_millis(),
             method: "POST".to_string(),
             url: "/v1/messages".to_string(),
-            status: 0, // 0 = pending/waiting for slot
+            status: 0,
             duration: 0,
             model: Some(request.model.clone()),
             mapped_model: None,
@@ -131,6 +131,8 @@ pub async fn handle_messages(
             response_body: None,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             protocol: Some("anthropic".to_string()),
             username: None,
         };
@@ -172,6 +174,8 @@ pub async fn handle_messages(
                     response_body: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                     protocol: Some("anthropic".to_string()),
                     username: None,
                 };

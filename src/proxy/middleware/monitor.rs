@@ -171,6 +171,8 @@ pub async fn monitor_middleware(
         response_body: None,
         input_tokens: None,
         output_tokens: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
         protocol,
         username,
     };
@@ -351,8 +353,17 @@ pub async fn monitor_middleware(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as u32);
                             
+                            let cache_creation = usage.get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32);
+                            let cache_read = usage.get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32);
+                            
                             if let Some(v) = new_input { log.input_tokens = Some(v); }
                             if let Some(v) = new_output { log.output_tokens = Some(v); }
+                            if let Some(v) = cache_creation { log.cache_creation_input_tokens = Some(v); }
+                            if let Some(v) = cache_read { log.cache_read_input_tokens = Some(v); }
                             
                             if log.input_tokens.is_none() && log.output_tokens.is_none() {
                                 log.output_tokens = usage.get("total_tokens")
@@ -421,6 +432,12 @@ pub async fn monitor_middleware(
                                         .or(usage.get("candidatesTokenCount"))
                                         .and_then(|v| v.as_u64())
                                         .map(|v| v as u32);
+                                    log.cache_creation_input_tokens = usage.get("cache_creation_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .map(|v| v as u32);
+                                    log.cache_read_input_tokens = usage.get("cache_read_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .map(|v| v as u32);
                                     break;
                                 }
                             }
@@ -456,6 +473,13 @@ pub async fn monitor_middleware(
                             log.output_tokens = usage.get("completion_tokens")
                                 .or(usage.get("output_tokens"))
                                 .or(usage.get("candidatesTokenCount"))
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32);
+                            
+                            log.cache_creation_input_tokens = usage.get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32);
+                            log.cache_read_input_tokens = usage.get("cache_read_input_tokens")
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as u32);
                                 

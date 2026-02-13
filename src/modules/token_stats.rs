@@ -79,7 +79,6 @@ fn connect_db() -> Result<Connection, String> {
 pub fn init_db() -> Result<(), String> {
     let conn = connect_db()?;
 
-    // Create main usage table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS token_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,13 +87,23 @@ pub fn init_db() -> Result<(), String> {
             model TEXT NOT NULL,
             input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
-            total_tokens INTEGER NOT NULL DEFAULT 0
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_input_tokens INTEGER DEFAULT 0,
+            cache_read_input_tokens INTEGER DEFAULT 0
         )",
         [],
     )
     .map_err(|e| e.to_string())?;
 
-    // Create indexes for efficient queries
+    let _ = conn.execute(
+        "ALTER TABLE token_usage ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE token_usage ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0",
+        [],
+    );
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_token_timestamp ON token_usage (timestamp DESC)",
         [],
@@ -107,7 +116,12 @@ pub fn init_db() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // Create hourly aggregation table for fast queries
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_token_model ON token_usage (model)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS token_stats_hourly (
             hour_bucket TEXT NOT NULL,
@@ -115,12 +129,23 @@ pub fn init_db() -> Result<(), String> {
             total_input_tokens INTEGER NOT NULL DEFAULT 0,
             total_output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_input_tokens INTEGER DEFAULT 0,
+            cache_read_input_tokens INTEGER DEFAULT 0,
             request_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (hour_bucket, account_email)
         )",
         [],
     )
     .map_err(|e| e.to_string())?;
+
+    let _ = conn.execute(
+        "ALTER TABLE token_stats_hourly ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE token_stats_hourly ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0",
+        [],
+    );
 
     Ok(())
 }
@@ -131,28 +156,31 @@ pub fn record_usage(
     model: &str,
     input_tokens: u32,
     output_tokens: u32,
+    cache_creation_tokens: u32,
+    cache_read_tokens: u32,
 ) -> Result<(), String> {
     let conn = connect_db()?;
     let timestamp = chrono::Utc::now().timestamp();
-    let total_tokens = input_tokens + output_tokens;
+    let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
 
-    // Insert into raw usage table
     conn.execute(
-        "INSERT INTO token_usage (timestamp, account_email, model, input_tokens, output_tokens, total_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![timestamp, account_email, model, input_tokens, output_tokens, total_tokens],
+        "INSERT INTO token_usage (timestamp, account_email, model, input_tokens, output_tokens, total_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![timestamp, account_email, model, input_tokens, output_tokens, total_tokens, cache_creation_tokens, cache_read_tokens],
     ).map_err(|e| e.to_string())?;
 
     let hour_bucket = chrono::Utc::now().format("%Y-%m-%d %H:00").to_string();
     conn.execute(
-        "INSERT INTO token_stats_hourly (hour_bucket, account_email, total_input_tokens, total_output_tokens, total_tokens, request_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1)
+        "INSERT INTO token_stats_hourly (hour_bucket, account_email, total_input_tokens, total_output_tokens, total_tokens, cache_creation_input_tokens, cache_read_input_tokens, request_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
          ON CONFLICT(hour_bucket, account_email) DO UPDATE SET
             total_input_tokens = total_input_tokens + ?3,
             total_output_tokens = total_output_tokens + ?4,
             total_tokens = total_tokens + ?5,
+            cache_creation_input_tokens = cache_creation_input_tokens + ?6,
+            cache_read_input_tokens = cache_read_input_tokens + ?7,
             request_count = request_count + 1",
-        params![hour_bucket, account_email, input_tokens, output_tokens, total_tokens],
+        params![hour_bucket, account_email, input_tokens, output_tokens, total_tokens, cache_creation_tokens, cache_read_tokens],
     ).map_err(|e| e.to_string())?;
 
     Ok(())

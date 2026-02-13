@@ -20,6 +20,8 @@ pub struct ProxyRequestLog {
     pub response_body: Option<String>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    pub cache_creation_input_tokens: Option<u32>,
+    pub cache_read_input_tokens: Option<u32>,
     pub protocol: Option<String>,
     pub username: Option<String>,
 }
@@ -134,9 +136,11 @@ impl ProxyMonitor {
                 let model = log_to_save.model.clone().unwrap_or_else(|| "unknown".to_string());
                 let input = log_to_save.input_tokens.unwrap_or(0);
                 let output = log_to_save.output_tokens.unwrap_or(0);
-                if input > 0 || output > 0 {
-                    if let Err(e) = crate::modules::token_stats::record_usage(account, &model, input, output) {
-                        tracing::debug!("Failed to record token stats: {}", e);
+                let cache_creation = log_to_save.cache_creation_input_tokens.unwrap_or(0);
+                let cache_read = log_to_save.cache_read_input_tokens.unwrap_or(0);
+                if input > 0 || output > 0 || cache_creation > 0 || cache_read > 0 {
+                    if let Err(e) = crate::modules::token_stats::record_usage(account, &model, input, output, cache_creation, cache_read) {
+                        tracing::warn!("Failed to record token stats: {}", e);
                     }
                 }
             }
@@ -180,19 +184,31 @@ impl ProxyMonitor {
             }
         }
 
-        // Record token stats
-        if let (Some(account), Some(input), Some(output)) = (
-            &log.account_email,
-            log.input_tokens,
-            log.output_tokens,
-        ) {
-            let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
-            let account = account.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output) {
-                    tracing::debug!("Failed to record token stats: {}", e);
-                }
-            });
+        tracing::debug!("update_log called: account={:?}, input={:?}, output={:?}, cache_creation={:?}, cache_read={:?}", 
+            log.account_email, log.input_tokens, log.output_tokens, log.cache_creation_input_tokens, log.cache_read_input_tokens);
+
+        if let Some(account) = &log.account_email {
+            let input = log.input_tokens.unwrap_or(0);
+            let output = log.output_tokens.unwrap_or(0);
+            let cache_creation = log.cache_creation_input_tokens.unwrap_or(0);
+            let cache_read = log.cache_read_input_tokens.unwrap_or(0);
+            if input > 0 || output > 0 || cache_creation > 0 || cache_read > 0 {
+                tracing::info!("Recording tokens: account={}, input={}, output={}, cache_creation={}, cache_read={}", 
+                    account, input, output, cache_creation, cache_read);
+                let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
+                let account = account.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output, cache_creation, cache_read) {
+                        tracing::warn!("Failed to record token stats: {}", e);
+                    } else {
+                        tracing::info!("Successfully recorded token stats for {}", account);
+                    }
+                });
+            } else {
+                tracing::debug!("No tokens to record for account {}: all zeros", account);
+            }
+        } else {
+            tracing::debug!("No account_email in log, skipping token recording");
         }
 
         if !self.is_enabled() {
