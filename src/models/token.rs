@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+fn default_token_type() -> String {
+    "Bearer".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct TokenData {
     pub access_token: String,
@@ -10,6 +14,7 @@ pub struct TokenData {
     #[zeroize(skip)]
     pub expiry_timestamp: i64,
     #[zeroize(skip)]
+    #[serde(default = "default_token_type")]
     pub token_type: String,
     #[zeroize(skip)]
     pub email: Option<String>,

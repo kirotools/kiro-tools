@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelQuota {
     pub name: String,
     pub percentage: i32, // 剩余百分比 0-100
+    #[serde(default)]
     pub reset_time: String,
     #[serde(default)]
     pub usage_limit: Option<f64>,
@@ -16,6 +17,7 @@ pub struct ModelQuota {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaData {
     pub models: Vec<ModelQuota>,
+    #[serde(default)]
     pub last_updated: i64,
     #[serde(default)]
     pub is_forbidden: bool,
