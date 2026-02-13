@@ -332,183 +332,102 @@ impl TokenManager {
 
     /// 加载单个账号
     async fn load_single_account(&self, path: &PathBuf) -> Result<Option<ProxyToken>, String> {
-        let content = std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
+        let account_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("Invalid account file name")?;
 
-        let mut account: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| format!("解析 JSON 失败: {}", e))?;
+        let account = crate::modules::account::load_account(account_id)
+            .map_err(|e| format!("Failed to load account {}: {}", account_id, e))?;
 
-        // [修复 #1344] 先检查账号是否被禁用
-        let is_proxy_disabled = account
-            .get("proxy_disabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let disabled_reason = account
-            .get("proxy_disabled_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if is_proxy_disabled {
+        if account.proxy_disabled {
             tracing::debug!(
-                "Account skipped due to manual disable: {:?} (email={}, reason={})",
+                "Account skipped due to manual disable: {:?} (email={}, reason={:?})",
                 path,
-                account
-                    .get("email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>"),
-                disabled_reason
+                account.email,
+                account.proxy_disabled_reason
             );
             return Ok(None);
         }
 
-        // [NEW] Check for validation block (VALIDATION_REQUIRED temporary block)
-        if account
-            .get("validation_blocked")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            let block_until = account
-                .get("validation_blocked_until")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-
+        if account.validation_blocked {
+            let block_until = account.validation_blocked_until.unwrap_or(0);
             let now = chrono::Utc::now().timestamp();
 
             if now < block_until {
-                // Still blocked
                 tracing::debug!(
                     "Skipping validation-blocked account: {:?} (email={}, blocked until {})",
                     path,
-                    account
-                        .get("email")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<unknown>"),
+                    account.email,
                     chrono::DateTime::from_timestamp(block_until, 0)
                         .map(|dt| dt.format("%H:%M:%S").to_string())
                         .unwrap_or_else(|| block_until.to_string())
                 );
                 return Ok(None);
             } else {
-                // Block expired - clear it
-                account["validation_blocked"] = serde_json::json!(false);
-                account["validation_blocked_until"] = serde_json::json!(0);
-                account["validation_blocked_reason"] = serde_json::Value::Null;
-
-                let updated_json =
-                    serde_json::to_string_pretty(&account).map_err(|e| e.to_string())?;
-                std::fs::write(path, updated_json).map_err(|e| e.to_string())?;
+                let mut updated_account = account.clone();
+                updated_account.validation_blocked = false;
+                updated_account.validation_blocked_until = None;
+                updated_account.validation_blocked_reason = None;
+                
+                if let Err(e) = crate::modules::account::save_account(&updated_account) {
+                    tracing::warn!("Failed to clear validation block: {}", e);
+                }
+                
                 tracing::info!(
                     "Validation block expired and cleared for account: {}",
-                    account
-                        .get("email")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<unknown>")
+                    account.email
                 );
             }
         }
 
-        // 最终检查账号主开关
-        if account
-            .get("disabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        if account.disabled {
             tracing::debug!(
                 "Skipping disabled account file: {:?} (email={})",
                 path,
-                account
-                    .get("email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>")
+                account.email
             );
             return Ok(None);
         }
 
-        // Safety check: verify state on disk again to handle concurrent mid-parse writes
         if Self::get_account_state_on_disk(path).await == OnDiskAccountState::Disabled {
             tracing::debug!("Account file {:?} is disabled on disk, skipping.", path);
             return Ok(None);
         }
 
-        // [兼容性] 检查账号是否被禁用
-        if account
-            .get("proxy_disabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            tracing::debug!(
-                "Skipping proxy-disabled account file: {:?} (email={})",
-                path,
-                account
-                    .get("email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>")
-            );
-            return Ok(None);
-        }
+        let subscription_tier = account.quota.as_ref()
+            .and_then(|q| q.subscription_tier.clone());
 
-        let account_id = account["id"].as_str()
-            .ok_or("缺少 id 字段")?
-            .to_string();
-
-        let email = account["email"].as_str()
-            .ok_or("缺少 email 字段")?
-            .to_string();
-
-        let token_obj = account["token"].as_object()
-            .ok_or("缺少 token 字段")?;
-
-        let access_token = token_obj["access_token"].as_str()
-            .ok_or("缺少 access_token")?
-            .to_string();
-
-        let refresh_token = token_obj["refresh_token"].as_str()
-            .ok_or("缺少 refresh_token")?
-            .to_string();
-
-        let expires_in = token_obj["expires_in"].as_i64()
-            .ok_or("缺少 expires_in")?;
-
-        let timestamp = token_obj["expiry_timestamp"].as_i64()
-            .ok_or("缺少 expiry_timestamp")?;
-
-        // project_id 是可选的
-        let project_id = token_obj
-            .get("project_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // 【新增】提取订阅等级 (subscription_tier 如 "Q_DEVELOPER_STANDALONE_POWER")
-        let subscription_tier = account
-            .get("quota")
-            .and_then(|q| q.get("subscription_tier"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // [FIX #563] 提取最大剩余配额百分比用于优先级排序 (Option<i32> now)
-        let remaining_quota = account
-            .get("quota")
-            .and_then(|q| self.calculate_quota_stats(q));
-            // .filter(|&r| r > 0); // 移除 >0 过滤，因为 0% 也是有效数据，只是优先级低
-
-        let health_score = self.health_scores.get(&account_id).map(|v| *v).unwrap_or(1.0);
-
-        // [NEW] 提取最近的配额刷新时间（用于排序优化：刷新时间越近优先级越高）
-        let reset_time = self.extract_earliest_reset_time(&account);
-
-        // [OPTIMIZATION] 构建模型配额内存缓存，避免排序时读取磁盘
-        let mut model_quotas = HashMap::new();
-        if let Some(models) = account.get("quota").and_then(|q| q.get("models")).and_then(|m| m.as_array()) {
-            for model in models {
-                if let (Some(name), Some(pct)) = (model.get("name").and_then(|v| v.as_str()), model.get("percentage").and_then(|v| v.as_i64())) {
-                    // Normalize name to standard ID
-                    let standard_id = crate::proxy::common::model_mapping::normalize_to_standard_id(name)
-                        .unwrap_or_else(|| name.to_string());
-                    model_quotas.insert(standard_id, pct as i32);
+        let remaining_quota = account.quota.as_ref()
+            .and_then(|q| {
+                let mut max_percentage = 0;
+                let mut has_data = false;
+                for model in &q.models {
+                    if model.percentage > max_percentage {
+                        max_percentage = model.percentage;
+                    }
+                    has_data = true;
                 }
+                if has_data { Some(max_percentage) } else { None }
+            });
+
+        let health_score = self.health_scores.get(&account.id).map(|v| *v).unwrap_or(1.0);
+
+        let reset_time = account.quota.as_ref()
+            .and_then(|q| {
+                q.models.iter()
+                    .filter_map(|m| chrono::DateTime::parse_from_rfc3339(&m.reset_time).ok())
+                    .map(|dt| dt.timestamp())
+                    .min()
+            });
+
+        let mut model_quotas = HashMap::new();
+        if let Some(quota) = &account.quota {
+            for model in &quota.models {
+                let standard_id = crate::proxy::common::model_mapping::normalize_to_standard_id(&model.name)
+                    .unwrap_or_else(|| model.name.clone());
+                model_quotas.insert(standard_id, model.percentage);
             }
-            // Kiro uses a single "kiro-credit" pool for all models.
-            // Expand it to all standard IDs so the per-model filter doesn't reject this account.
             if let Some(&kiro_pct) = model_quotas.get("kiro-credit") {
                 for std_id in &["claude"] {
                     model_quotas.entry(std_id.to_string()).or_insert(kiro_pct);
@@ -517,27 +436,28 @@ impl TokenManager {
         }
 
         Ok(Some(ProxyToken {
-            account_id,
-            access_token,
-            refresh_token,
-            expires_in,
-            timestamp,
-            email,
+            account_id: account.id,
+            access_token: account.token.access_token.clone(),
+            refresh_token: account.token.refresh_token.clone(),
+            expires_in: account.token.expires_in,
+            timestamp: account.token.expiry_timestamp,
+            email: account.email,
             account_path: path.clone(),
-            project_id,
+            project_id: account.token.project_id.clone(),
             subscription_tier,
             remaining_quota,
             health_score,
             reset_time,
-            validation_blocked: account.get("validation_blocked").and_then(|v| v.as_bool()).unwrap_or(false),
-            validation_blocked_until: account.get("validation_blocked_until").and_then(|v| v.as_i64()).unwrap_or(0),
+            validation_blocked: account.validation_blocked,
+            validation_blocked_until: account.validation_blocked_until.unwrap_or(0),
             model_quotas,
-            profile_arn: account.get("profileArn").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            profile_arn: None,
         }))
     }
 
     /// 计算账号的最大剩余配额百分比（用于排序）
     /// 返回值: Option<i32> (max_percentage)
+    #[allow(dead_code)]
     fn calculate_quota_stats(&self, quota: &serde_json::Value) -> Option<i32> {
         let models = match quota.get("models").and_then(|m| m.as_array()) {
             Some(m) => m,
@@ -2087,6 +2007,7 @@ impl TokenManager {
     ///
     /// Claude 模型（sonnet/opus）共用同一个刷新时间，只需取 claude 系列的 reset_time
     /// 返回 Unix 时间戳（秒），用于排序时比较
+    #[allow(dead_code)]
     fn extract_earliest_reset_time(&self, account: &serde_json::Value) -> Option<i64> {
         let models = account
             .get("quota")
