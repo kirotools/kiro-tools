@@ -965,10 +965,17 @@ impl TokenManager {
                                 bound_token.email, reset_sec
                             );
                             self.session_accounts.remove(sid);
-                        } else if !attempted.contains(&bound_id) {
+                        } else if !attempted.contains(&bound_id)
+                            && self.has_available_slot(&bound_id)
+                        {
                             // 3. 账号可用且未被标记为尝试失败，优先复用
                             tracing::debug!("Sticky Session: Successfully reusing bound account {} for session {}", bound_token.email, sid);
                             target_token = Some(bound_token.clone());
+                        } else if !attempted.contains(&bound_id) {
+                            tracing::debug!(
+                                "Sticky Session: Bound account {} has no available concurrency slot, selecting another account",
+                                bound_token.email
+                            );
                         }
                     } else {
                         // 绑定的账号已不存在（可能被删除），解绑
@@ -999,6 +1006,7 @@ impl TokenManager {
                             if !self
                                 .is_rate_limited(&found.account_id, Some(&normalized_target))
                                 .await
+                                && self.has_available_slot(&found.account_id)
                             {
                                 tracing::debug!(
                                     "60s Window: Force reusing last account: {}",
@@ -1007,7 +1015,7 @@ impl TokenManager {
                                 target_token = Some(found.clone());
                             } else {
                                 tracing::debug!(
-                                    "60s Window: Last account {} is rate-limited, skipping",
+                                    "60s Window: Last account {} is rate-limited or has no available slot, skipping",
                                     found.email
                                 );
                             }
@@ -1024,9 +1032,20 @@ impl TokenManager {
                         non_limited.push(t.clone());
                     }
 
-                    if let Some(selected) = self.select_with_p2c(
-                        &non_limited, &attempted
-                    ) {
+                    let mut non_limited_available: Vec<ProxyToken> = Vec::new();
+                    for t in &non_limited {
+                        if self.has_available_slot(&t.account_id) {
+                            non_limited_available.push(t.clone());
+                        }
+                    }
+
+                    let selected = if !non_limited_available.is_empty() {
+                        self.select_with_p2c(&non_limited_available, &attempted)
+                    } else {
+                        self.select_with_p2c(&non_limited, &attempted)
+                    };
+
+                    if let Some(selected) = selected {
                         target_token = Some(selected.clone());
                         need_update_last_used = Some((selected.account_id.clone(), std::time::Instant::now()));
 
@@ -1058,9 +1077,20 @@ impl TokenManager {
                     non_limited.push(t.clone());
                 }
 
-                if let Some(selected) = self.select_with_p2c(
-                    &non_limited, &attempted
-                ) {
+                let mut non_limited_available: Vec<ProxyToken> = Vec::new();
+                for t in &non_limited {
+                    if self.has_available_slot(&t.account_id) {
+                        non_limited_available.push(t.clone());
+                    }
+                }
+
+                let selected = if !non_limited_available.is_empty() {
+                    self.select_with_p2c(&non_limited_available, &attempted)
+                } else {
+                    self.select_with_p2c(&non_limited, &attempted)
+                };
+
+                if let Some(selected) = selected {
                     tracing::debug!("  {} - SELECTED via P2C", selected.email);
                     target_token = Some(selected.clone());
 
@@ -3775,5 +3805,109 @@ mod tests {
         assert!(manager.has_available_slot("acc2"), "acc2 should be independent and available");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_get_token_skips_full_last_used_account_when_others_available() {
+        let tmp_root = std::env::temp_dir().join(format!(
+            "kiro-token-select-conc-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let accounts_dir = tmp_root.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let model = "claude-sonnet-4";
+        let now = chrono::Utc::now().timestamp();
+
+        for (account_id, email, access_token, refresh_token) in [
+            ("acc1", "a@test.com", "atk1", "rtk1"),
+            ("acc2", "b@test.com", "atk2", "rtk2"),
+        ] {
+            let account_path = accounts_dir.join(format!("{}.json", account_id));
+            let account_json = serde_json::json!({
+                "id": account_id,
+                "email": email,
+                "token": {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_in": 3600,
+                    "expiry_timestamp": now + 3600
+                },
+                "disabled": false,
+                "proxy_disabled": false,
+                "quota": {
+                    "is_forbidden": false
+                },
+                "created_at": now,
+                "last_used": now
+            });
+            std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap())
+                .unwrap();
+        }
+
+        let manager = TokenManager::new(tmp_root.clone());
+        manager.set_max_concurrency(1);
+
+        let quota_key = crate::proxy::common::model_mapping::normalize_to_standard_id(model)
+            .unwrap_or_else(|| model.to_string());
+
+        let mut model_quotas = std::collections::HashMap::new();
+        model_quotas.insert(quota_key, 100);
+
+        let token1 = ProxyToken {
+            account_id: "acc1".to_string(),
+            access_token: "atk1".to_string(),
+            refresh_token: "rtk1".to_string(),
+            expires_in: 3600,
+            timestamp: now + 3600,
+            email: "a@test.com".to_string(),
+            account_path: accounts_dir.join("acc1.json"),
+            project_id: None,
+            subscription_tier: Some("pro".to_string()),
+            remaining_quota: Some(100),
+            health_score: 1.0,
+            reset_time: None,
+            validation_blocked: false,
+            validation_blocked_until: 0,
+            model_quotas: model_quotas.clone(),
+            profile_arn: None,
+        };
+        let token2 = ProxyToken {
+            account_id: "acc2".to_string(),
+            access_token: "atk2".to_string(),
+            refresh_token: "rtk2".to_string(),
+            expires_in: 3600,
+            timestamp: now + 3600,
+            email: "b@test.com".to_string(),
+            account_path: accounts_dir.join("acc2.json"),
+            project_id: None,
+            subscription_tier: Some("pro".to_string()),
+            remaining_quota: Some(100),
+            health_score: 1.0,
+            reset_time: None,
+            validation_blocked: false,
+            validation_blocked_until: 0,
+            model_quotas,
+            profile_arn: None,
+        };
+
+        manager.tokens.insert("acc1".to_string(), token1);
+        manager.tokens.insert("acc2".to_string(), token2);
+
+        {
+            let mut last_used = manager.last_used_account.lock().await;
+            *last_used = Some(("acc1".to_string(), std::time::Instant::now()));
+        }
+
+        let _slot = manager.try_acquire_slot("acc1").unwrap();
+        assert!(!manager.has_available_slot("acc1"), "acc1 should be full");
+        assert!(manager.has_available_slot("acc2"), "acc2 should be available");
+
+        let (_atk, _proj, _email, account_id, _wait_ms) =
+            manager.get_token("claude", false, None, model).await.unwrap();
+
+        assert_eq!(account_id, "acc2");
+
+        std::fs::remove_dir_all(&tmp_root).ok();
     }
 }
