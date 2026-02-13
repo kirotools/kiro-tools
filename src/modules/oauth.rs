@@ -130,20 +130,52 @@ pub async fn refresh_access_token_with_source(
 
 /// Helper: obtain a TokenResponse from a KiroAuthManager.
 async fn token_from_manager(manager: &KiroAuthManager) -> Result<TokenResponse, String> {
+    let expires_at_before = manager.expires_at().await;
+    let now = chrono::Utc::now();
+    
+    if let Some(exp) = expires_at_before {
+        let seconds_until_expiry = (exp - now).num_seconds();
+        if seconds_until_expiry < 0 {
+            crate::modules::logger::log_warn(&format!(
+                "Token EXPIRED {} seconds ago, attempting refresh...",
+                -seconds_until_expiry
+            ));
+        } else if seconds_until_expiry < 600 {
+            crate::modules::logger::log_info(&format!(
+                "Token expiring in {} seconds, will refresh preemptively",
+                seconds_until_expiry
+            ));
+        } else {
+            crate::modules::logger::log_info(&format!(
+                "Token valid for {} seconds, no refresh needed",
+                seconds_until_expiry
+            ));
+        }
+    } else {
+        crate::modules::logger::log_warn("No expiration time found, will attempt refresh");
+    }
+
     let access_token = manager
         .get_access_token()
         .await
         .map_err(|e| format!("Kiro token refresh failed: {}", e))?;
 
-    let expires_at = manager.expires_at().await;
-    let expires_in = expires_at
+    let expires_at_after = manager.expires_at().await;
+    let expires_in = expires_at_after
         .map(|e| (e - chrono::Utc::now()).num_seconds().max(0))
         .unwrap_or(3600);
 
-    crate::modules::logger::log_info(&format!(
-        "Token refreshed successfully! Expires in: {} seconds",
-        expires_in
-    ));
+    if expires_at_before != expires_at_after {
+        crate::modules::logger::log_info(&format!(
+            "Token refreshed! New expiration: {} seconds from now",
+            expires_in
+        ));
+    } else {
+        crate::modules::logger::log_info(&format!(
+            "Using existing token, expires in {} seconds",
+            expires_in
+        ));
+    }
 
     Ok(TokenResponse {
         access_token,
