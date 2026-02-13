@@ -1021,10 +1021,6 @@ impl TokenManager {
                         if self.is_rate_limited(&t.account_id, Some(&normalized_target)).await {
                             continue;
                         }
-                        if !self.has_available_slot(&t.account_id) {
-                            tracing::debug!("账号 {} 并发槽位已满，跳过", t.email);
-                            continue;
-                        }
                         non_limited.push(t.clone());
                     }
 
@@ -1057,10 +1053,6 @@ impl TokenManager {
                 let mut non_limited: Vec<ProxyToken> = Vec::new();
                 for t in &tokens_snapshot {
                     if self.is_rate_limited(&t.account_id, Some(&normalized_target)).await {
-                        continue;
-                    }
-                    if !self.has_available_slot(&t.account_id) {
-                        tracing::debug!("账号 {} 并发槽位已满，跳过", t.email);
                         continue;
                     }
                     non_limited.push(t.clone());
@@ -1539,12 +1531,19 @@ impl TokenManager {
 
     /// [NEW] 检查账号是否在限流中 (同步版本，仅用于 Iterator)
     pub fn is_rate_limited_sync(&self, account_id: &str, model: Option<&str>) -> bool {
-        // 同步版本无法读取 async RwLock，这里使用 blocking_read
-        let config = self.circuit_breaker_config.blocking_read();
-        if !config.enabled {
-            return false;
+        // 使用 try_read 避免在 async runtime 中阻塞
+        match self.circuit_breaker_config.try_read() {
+            Ok(config) => {
+                if !config.enabled {
+                    return false;
+                }
+                self.rate_limit_tracker.is_rate_limited(account_id, model)
+            }
+            Err(_) => {
+                // 如果锁被占用，保守地假设未限流（避免误杀）
+                false
+            }
         }
-        self.rate_limit_tracker.is_rate_limited(account_id, model)
     }
 
     /// 获取距离限流重置还有多少秒
