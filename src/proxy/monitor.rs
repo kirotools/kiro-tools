@@ -47,6 +47,17 @@ impl ProxyMonitor {
             tracing::error!("Failed to initialize proxy DB: {}", e);
         }
 
+        match crate::modules::proxy_db::clear_stale_pending_logs() {
+            Ok(updated) => {
+                if updated > 0 {
+                    tracing::info!("Startup cleanup: cleared {} stale pending log(s)", updated);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to clear stale pending logs: {}", e);
+            }
+        }
+
         // Auto cleanup old logs (keep last 30 days)
         tokio::spawn(async {
             match crate::modules::proxy_db::cleanup_old_logs(30) {

@@ -87,6 +87,15 @@ pub fn init_db() -> Result<(), String> {
     Ok(())
 }
 
+pub fn clear_stale_pending_logs() -> Result<usize, String> {
+    let conn = connect_db()?;
+    conn.execute(
+        "UPDATE request_logs SET status = 503, error = COALESCE(error, 'Aborted: server restarted') WHERE status = 0",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
     let conn = connect_db()?;
 
@@ -204,6 +213,66 @@ pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestL
 /// Get logs (backward compatible, calls get_logs_summary)
 pub fn get_logs(limit: usize) -> Result<Vec<ProxyRequestLog>, String> {
     get_logs_summary(limit, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn test_clear_stale_pending_logs_updates_status() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+
+        let tmp_root =
+            std::env::temp_dir().join(format!("kiro-proxy-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        std::env::set_var("KIRO_DATA_DIR", tmp_root.to_string_lossy().to_string());
+
+        init_db().unwrap();
+
+        let pending = ProxyRequestLog {
+            id: "log1".to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            method: "POST".to_string(),
+            url: "/v1/messages".to_string(),
+            status: 0,
+            duration: 0,
+            model: Some("claude".to_string()),
+            mapped_model: None,
+            account_email: Some("a@test.com".to_string()),
+            client_ip: None,
+            error: None,
+            request_body: None,
+            response_body: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            protocol: Some("anthropic".to_string()),
+            username: None,
+        };
+        save_log(&pending).unwrap();
+
+        let updated = clear_stale_pending_logs().unwrap();
+        assert_eq!(updated, 1);
+
+        let conn = connect_db().unwrap();
+        let status: i64 = conn
+            .query_row(
+                "SELECT status FROM request_logs WHERE id = ?1",
+                params!["log1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(status, 0);
+
+        std::env::remove_var("KIRO_DATA_DIR");
+        std::fs::remove_dir_all(&tmp_root).ok();
+    }
 }
 
 pub fn get_stats() -> Result<crate::proxy::monitor::ProxyStats, String> {
