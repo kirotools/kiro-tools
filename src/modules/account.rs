@@ -313,6 +313,110 @@ mod tests {
 
         println!("Backup creation on parse failure: successfully created backup");
     }
+
+    #[test]
+    fn test_account_encryption_on_save() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = TestDataDir::new();
+
+        let accounts_dir = dir.path().join("accounts");
+        fs::create_dir_all(&accounts_dir).unwrap();
+
+        let token = crate::models::TokenData::new(
+            "test_access_token_plaintext".to_string(),
+            "test_refresh_token_plaintext".to_string(),
+            3600,
+            Some("test@example.com".to_string()),
+            None,
+            None,
+        );
+
+        let account = crate::models::Account::new(
+            "test-encrypt-id".to_string(),
+            "test@example.com".to_string(),
+            token,
+        );
+
+        save_account_to_dir(&accounts_dir, &account).unwrap();
+
+        let account_path = accounts_dir.join("test-encrypt-id.json");
+        let content = fs::read_to_string(&account_path).unwrap();
+
+        assert!(!content.contains("test_access_token_plaintext"));
+        assert!(!content.contains("test_refresh_token_plaintext"));
+        assert!(content.contains("\"encrypted\"") && content.contains("true"));
+    }
+
+    #[test]
+    fn test_account_decryption_on_load() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = TestDataDir::new();
+
+        let accounts_dir = dir.path().join("accounts");
+        fs::create_dir_all(&accounts_dir).unwrap();
+
+        let original_access = "test_access_original";
+        let original_refresh = "test_refresh_original";
+
+        let token = crate::models::TokenData::new(
+            original_access.to_string(),
+            original_refresh.to_string(),
+            3600,
+            Some("test@example.com".to_string()),
+            None,
+            None,
+        );
+
+        let account = crate::models::Account::new(
+            "test-decrypt-id".to_string(),
+            "test@example.com".to_string(),
+            token,
+        );
+
+        save_account_to_dir(&accounts_dir, &account).unwrap();
+
+        let account_path = accounts_dir.join("test-decrypt-id.json");
+        let loaded = load_account_at_path(&account_path).unwrap();
+
+        assert_eq!(loaded.token.access_token, original_access);
+        assert_eq!(loaded.token.refresh_token, original_refresh);
+        assert!(!loaded.encrypted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_account_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = TestDataDir::new();
+
+        let accounts_dir = dir.path().join("accounts");
+        fs::create_dir_all(&accounts_dir).unwrap();
+
+        let token = crate::models::TokenData::new(
+            "test_access".to_string(),
+            "test_refresh".to_string(),
+            3600,
+            Some("test@example.com".to_string()),
+            None,
+            None,
+        );
+
+        let account = crate::models::Account::new(
+            "test-perms-id".to_string(),
+            "test@example.com".to_string(),
+            token,
+        );
+
+        save_account_to_dir(&accounts_dir, &account).unwrap();
+
+        let account_path = accounts_dir.join("test-perms-id.json");
+        let metadata = fs::metadata(&account_path).unwrap();
+        let permissions = metadata.permissions();
+
+        assert_eq!(permissions.mode() & 0o777, 0o600);
+    }
 }
 
 /// Global account write lock to prevent corruption during concurrent operations
@@ -508,7 +612,14 @@ fn rebuild_index_from_accounts_in_dir(data_dir: &PathBuf) -> Result<AccountIndex
 fn load_account_at_path(account_path: &PathBuf) -> Result<Account, String> {
     let content = fs::read_to_string(account_path)
         .map_err(|e| format!("failed_to_read_account_data: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed_to_parse_account_data: {}", e))
+    let mut account: Account = serde_json::from_str(&content)
+        .map_err(|e| format!("failed_to_parse_account_data: {}", e))?;
+    
+    if account.encrypted {
+        account.decrypt_tokens()?;
+    }
+    
+    Ok(account)
 }
 
 /// Load account index with recovery support
@@ -647,12 +758,28 @@ pub fn load_account(account_id: &str) -> Result<Account, String> {
 /// Save account data
 pub fn save_account(account: &Account) -> Result<(), String> {
     let accounts_dir = get_accounts_dir()?;
+    save_account_to_dir(&accounts_dir, account)
+}
+
+fn save_account_to_dir(accounts_dir: &PathBuf, account: &Account) -> Result<(), String> {
     let account_path = accounts_dir.join(format!("{}.json", account.id));
 
-    let content = serde_json::to_string_pretty(account)
+    let mut account_to_save = account.clone();
+    account_to_save.encrypt_tokens()?;
+
+    let content = serde_json::to_string_pretty(&account_to_save)
         .map_err(|e| format!("failed_to_serialize_account_data: {}", e))?;
 
-    fs::write(&account_path, content).map_err(|e| format!("failed_to_save_account_data: {}", e))
+    fs::write(&account_path, content).map_err(|e| format!("failed_to_save_account_data: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&account_path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed_to_set_file_permissions: {}", e))?;
+    }
+
+    Ok(())
 }
 
 /// List all accounts
@@ -1059,7 +1186,7 @@ pub fn export_accounts_by_ids(account_ids: &[String]) -> Result<crate::models::A
         .filter(|acc| account_ids.contains(&acc.id))
         .map(|acc| AccountExportItem {
             email: acc.email,
-            refresh_token: acc.token.refresh_token,
+            refresh_token: acc.token.refresh_token.clone(),
         })
         .collect();
 
@@ -1075,7 +1202,7 @@ pub fn export_accounts() -> Result<Vec<(String, String)>, String> {
     let mut exports = Vec::new();
 
     for account in accounts {
-        exports.push((account.email, account.token.refresh_token));
+        exports.push((account.email, account.token.refresh_token.clone()));
     }
 
     Ok(exports)

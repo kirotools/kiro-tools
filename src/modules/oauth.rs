@@ -95,14 +95,16 @@ pub async fn refresh_access_token_with_source(
     }
 
     // Build a new manager with explicit source priority: sqlite_db > creds_file > refresh_token
+    // [FIX] Removed environment variable fallback to ensure each account uses its own credentials
+    // Environment variables should only be used for initial account setup, not for token refresh
     let manager = KiroAuthManager::new(
         refresh_token.map(String::from),
         None,
         std::env::var("KIRO_REGION").ok(),
-        creds_file.map(String::from).or_else(|| std::env::var("KIRO_CREDS_FILE").ok()),
+        creds_file.map(String::from),
         None,
         None,
-        sqlite_db.map(String::from).or_else(|| std::env::var("KIRO_CLI_DB_FILE").ok()),
+        sqlite_db.map(String::from),
     );
 
     if let Some(aid) = account_id {

@@ -691,12 +691,16 @@ pub fn get_username_for_ip(ip: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_create_and_query_token() {
-        let _ = init_db(); // Ensure DB is initialized
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
-        // Use a random username to avoid collisions in existing DB runs during dev
+        let _ = init_db();
+
         let username = format!("TestUser_{}", Uuid::new_v4());
         let token_res = create_token(
             username.clone(),
@@ -716,5 +720,7 @@ mod tests {
         let fetched = get_token_by_id(&token.id);
         assert!(fetched.is_ok());
         assert_eq!(fetched.unwrap().unwrap().username, username);
+
+        std::env::remove_var("KIRO_DATA_DIR");
     }
 }

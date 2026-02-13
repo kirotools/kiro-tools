@@ -1,18 +1,24 @@
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct TokenData {
     pub access_token: String,
     pub refresh_token: String,
+    #[zeroize(skip)]
     pub expires_in: i64,
+    #[zeroize(skip)]
     pub expiry_timestamp: i64,
+    #[zeroize(skip)]
     pub token_type: String,
+    #[zeroize(skip)]
     pub email: Option<String>,
-    /// 项目ID，用于 API 请求标识
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
     pub project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>, // Kiro sessionId
+    #[zeroize(skip)]
+    pub session_id: Option<String>,
 }
 
 impl TokenData {

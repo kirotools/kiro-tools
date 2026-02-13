@@ -47,6 +47,8 @@ pub struct Account {
     /// 用户自定义标签
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_label: Option<String>,
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 impl Account {
@@ -72,6 +74,7 @@ impl Account {
             proxy_id: None,
             proxy_bound_at: None,
             custom_label: None,
+            encrypted: false,
         }
     }
 
@@ -81,6 +84,32 @@ impl Account {
 
     pub fn update_quota(&mut self, quota: QuotaData) {
         self.quota = Some(quota);
+    }
+
+    pub fn encrypt_tokens(&mut self) -> Result<(), String> {
+        if self.encrypted {
+            return Ok(());
+        }
+
+        self.token.access_token = crate::utils::crypto::encrypt_string(&self.token.access_token)
+            .map_err(|e| format!("Failed to encrypt access_token: {}", e))?;
+        self.token.refresh_token = crate::utils::crypto::encrypt_string(&self.token.refresh_token)
+            .map_err(|e| format!("Failed to encrypt refresh_token: {}", e))?;
+        self.encrypted = true;
+        Ok(())
+    }
+
+    pub fn decrypt_tokens(&mut self) -> Result<(), String> {
+        if !self.encrypted {
+            return Ok(());
+        }
+
+        self.token.access_token = crate::utils::crypto::decrypt_string(&self.token.access_token)
+            .map_err(|e| format!("Failed to decrypt access_token: {}", e))?;
+        self.token.refresh_token = crate::utils::crypto::decrypt_string(&self.token.refresh_token)
+            .map_err(|e| format!("Failed to decrypt refresh_token: {}", e))?;
+        self.encrypted = false;
+        Ok(())
     }
 }
 

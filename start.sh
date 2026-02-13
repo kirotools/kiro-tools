@@ -119,21 +119,10 @@ do_start() {
         do_build
     fi
 
-    # 自动检测 KIRO_CREDS_FILE
-    if [ -z "${KIRO_CREDS_FILE:-}" ]; then
-        local auto_creds="$HOME/.aws/sso/cache/kiro-auth-token.json"
-        if [ -f "$auto_creds" ]; then
-            export KIRO_CREDS_FILE="$auto_creds"
-            _green "自动检测到凭证文件: $auto_creds"
-        else
-            _yellow "警告: KIRO_CREDS_FILE 未设置，凭证可能需要通过其他方式配置"
-        fi
-    fi
-
     rotate_log
 
     _green ">>> 启动 kiro-tools (端口: $PORT)..."
-    KIRO_CREDS_FILE="${KIRO_CREDS_FILE:-}" KIRO_DIST_PATH="$DIST" nohup "$BIN" >> "$LOG_FILE" 2>&1 &
+    KIRO_DIST_PATH="$DIST" nohup "$BIN" >> "$LOG_FILE" 2>&1 &
     local new_pid=$!
     write_pid "$new_pid"
 

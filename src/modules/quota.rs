@@ -258,5 +258,5 @@ pub async fn get_valid_token_for_account(account: &crate::models::account::Accou
     }
 
     // Kiro doesn't need project_id, return empty string as placeholder
-    Ok((account.token.access_token, String::new()))
+    Ok((account.token.access_token.clone(), String::new()))
 }

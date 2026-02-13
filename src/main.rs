@@ -7,6 +7,9 @@ mod proxy;
 pub mod error;
 pub mod constants;
 
+#[cfg(test)]
+mod test_utils;
+
 use modules::logger;
 use tracing::{info, error};
 use std::sync::Arc;
@@ -49,6 +52,16 @@ async fn main() {
     }
     if let Err(e) = modules::user_token_db::init_db() {
         error!("Failed to initialize user token database: {}", e);
+    }
+
+    match modules::migration::migrate_accounts_to_encrypted() {
+        Ok(count) if count > 0 => {
+            info!("Migrated {} account(s) to encrypted storage", count);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!("Failed to migrate accounts to encrypted storage: {}", e);
+        }
     }
 
     info!("Starting kiro-tools server...");

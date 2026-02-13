@@ -9,6 +9,7 @@ pub mod token_stats;
 pub mod cloudflared;
 pub mod integration;
 pub mod account_service;
+pub mod migration;
 #[allow(dead_code)]
 pub mod http_api;
 pub mod cache;
