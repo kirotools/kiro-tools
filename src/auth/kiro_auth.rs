@@ -132,9 +132,25 @@ impl Inner {
             Ok(c) => c,
             Err(e) => { error!("Error reading credentials file: {}", e); return; }
         };
-        let data: FileCredentials = match serde_json::from_str(&content) {
+        
+        let data: FileCredentials = match serde_json::from_str::<FileCredentials>(&content) {
             Ok(d) => d,
-            Err(e) => { error!("Error parsing credentials file: {}", e); return; }
+            Err(_) => {
+                match serde_json::from_str::<Vec<FileCredentials>>(&content) {
+                    Ok(mut arr) if !arr.is_empty() => {
+                        debug!("Credentials file is array format, using first element");
+                        arr.remove(0)
+                    }
+                    Ok(_) => {
+                        error!("Credentials file is empty array");
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Error parsing credentials file: {}", e);
+                        return;
+                    }
+                }
+            }
         };
 
         if data.refresh_token.is_some() { self.refresh_token = data.refresh_token; }
