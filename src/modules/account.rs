@@ -1093,6 +1093,7 @@ pub fn list_accounts() -> Result<Vec<Account>, String> {
 }
 
 /// Add account
+#[allow(dead_code)]
 pub fn add_account(
     email: String,
     name: Option<String>,
