@@ -209,6 +209,14 @@ fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Too
         .collect()
 }
 
+fn has_unsupported_server_tools(request: &ClaudeRequest) -> bool {
+    request
+        .tools
+        .as_ref()
+        .map(|tools| tools.iter().any(|tool| tool.is_web_search()))
+        .unwrap_or(false)
+}
+
 /// Merge consecutive same-role messages into alternating user/assistant pairs
 fn merge_to_alternating(messages: &[Message]) -> Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> {
     let mut merged: Vec<(String, String, Vec<Value>, Vec<Value>, Vec<Value>)> = Vec::new();
@@ -1538,6 +1546,14 @@ pub async fn handle_kiro_messages(
     token_manager: &crate::proxy::token_manager::TokenManager,
     original_model: Option<&str>,
 ) -> Response {
+    if has_unsupported_server_tools(request) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            AnthropicErrorType::InvalidRequestError,
+            "web_search_20250305 is an Anthropic server tool and is not supported on the current Kiro upstream path",
+        );
+    }
+
     let fingerprint = get_machine_fingerprint();
     let kiro_host = get_kiro_q_host(region);
     let url = format!("{}/generateAssistantResponse", kiro_host);
@@ -2041,6 +2057,35 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(desc2, "short desc");
+    }
+
+    #[test]
+    fn test_has_unsupported_server_tools() {
+        use crate::proxy::mappers::claude::models::Tool;
+
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            messages: vec![],
+            max_tokens: Some(256),
+            system: None,
+            tools: Some(vec![Tool {
+                type_: Some("web_search_20250305".to_string()),
+                name: Some("web_search".to_string()),
+                description: None,
+                input_schema: None,
+            }]),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            thinking: None,
+            metadata: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+
+        assert!(has_unsupported_server_tools(&request));
     }
 
     // Property 13: Image content conversion
