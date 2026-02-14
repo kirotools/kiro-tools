@@ -1,6 +1,10 @@
 use crate::models::{Account, TokenData};
 use crate::modules;
 
+fn is_http_unauthorized_error(err: &str) -> bool {
+    err.contains("HTTP 401")
+}
+
 /// 账号服务层 - 彻底解除对 Tauri 运行时的依赖
 pub struct AccountService {
     pub integration: crate::modules::integration::SystemManager,
@@ -39,8 +43,20 @@ impl AccountService {
         )
         .await?;
 
-        // 2. 获取用户信息
-        let user_info = modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await?;
+        let user_info = match modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await {
+            Ok(info) => info,
+            Err(e) if is_http_unauthorized_error(&e) => {
+                let retry_token_res = modules::oauth::refresh_access_token_with_source(
+                    refresh_token,
+                    creds_file,
+                    sqlite_db,
+                    Some(&temp_account_id),
+                )
+                .await?;
+                modules::oauth::get_user_info(&retry_token_res.access_token, Some(&temp_account_id)).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         // 3. Kiro accounts use a fixed project ID
         let project_id = Some("kiro-native".to_string());
@@ -125,5 +141,22 @@ impl AccountService {
     /// 获取当前 ID
     pub fn get_current_id(&self) -> Result<Option<String>, String> {
         modules::get_current_account_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_http_unauthorized_error;
+
+    #[test]
+    fn detects_401_error_text() {
+        let err = "Failed to fetch user info: HTTP 401 - unauthorized";
+        assert!(is_http_unauthorized_error(err));
+    }
+
+    #[test]
+    fn ignores_non_401_error_text() {
+        let err = "Failed to fetch user info: HTTP 403 - forbidden";
+        assert!(!is_http_unauthorized_error(err));
     }
 }

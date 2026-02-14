@@ -523,7 +523,13 @@ impl KiroAuthManager {
                     return Err(AuthError::TokenExpiredRefreshFailed);
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if inner.access_token.is_some() && !inner.is_token_expired() {
+                    warn!("Token refresh failed, using existing access_token until it expires");
+                    return Ok(inner.access_token.clone().unwrap());
+                }
+                return Err(e);
+            }
         }
 
         inner.access_token.clone().ok_or(AuthError::TokenUnavailable)
@@ -929,6 +935,19 @@ mod tests {
         }
         let result = mgr.get_access_token().await;
         assert_eq!(result.unwrap(), "valid_token");
+    }
+
+    #[tokio::test]
+    async fn test_get_access_token_uses_unexpired_token_when_refresh_fails() {
+        let mgr = KiroAuthManager::new(None, None, None, None, None, None, None);
+        {
+            let mut inner = mgr.inner.lock().await;
+            inner.access_token = Some("still_valid_token".into());
+            inner.expires_at = Some(Utc::now() + Duration::seconds(60));
+        }
+
+        let result = mgr.get_access_token().await;
+        assert_eq!(result.unwrap(), "still_valid_token");
     }
 
     #[tokio::test]
