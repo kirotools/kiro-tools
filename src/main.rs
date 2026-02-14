@@ -132,6 +132,16 @@ async fn main() {
                 }
             }
 
+            let env_port = std::env::var("KIRO_PORT")
+                .or_else(|_| std::env::var("PORT"))
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok());
+            if let Some(port) = env_port {
+                info!("Using Port from environment variable: {}", port);
+                config.proxy.port = port;
+                modified = true;
+            }
+
             info!("--------------------------------------------------");
             info!("Proxy service starting...");
             info!("Port: {}", config.proxy.port);

@@ -141,6 +141,18 @@ jobs:
 
           # 监听端口 (默认 8045)
           #KIRO_PORT=8045
+
+          # API 密钥 (可选，默认自动生成)
+          #KIRO_API_KEY=sk-your-api-key
+
+          # Web UI 密码 (可选，默认与 API Key 相同)
+          #KIRO_WEB_PASSWORD=your-password
+
+          # 认证模式 (可选: off, strict, all_except_health, auto)
+          #KIRO_AUTH_MODE=all_except_health
+
+          # 是否仅本地访问 (true=仅127.0.0.1, false=允许局域网0.0.0.0)
+          #KIRO_BIND_LOCAL_ONLY=false
           ENVFILE
           sed -i 's/^          //' "${PKG_DIR}/etc/kiro-tools/env"
 

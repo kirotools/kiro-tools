@@ -67,6 +67,16 @@ sudo systemctl restart kiro-tools
 # 下载并安装
 sudo dpkg -i kiro-tools_*_amd64.deb
 
+# 配置环境变量（可选）
+sudo nano /etc/kiro-tools/env
+# 取消注释并修改需要的配置项：
+#   KIRO_PORT=8045              # 监听端口
+#   KIRO_CREDS_FILE=/path/to/kiro-auth-token.json
+#   KIRO_API_KEY=sk-xxx         # API 密钥
+#   KIRO_WEB_PASSWORD=xxx       # Web UI 密码
+#   KIRO_AUTH_MODE=all_except_health
+#   KIRO_BIND_LOCAL_ONLY=false  # 是否仅本地访问
+
 # 启动服务
 sudo systemctl start kiro-tools
 sudo systemctl enable kiro-tools   # 开机自启
@@ -90,7 +100,15 @@ docker run -d -p 8045:8045 \
   -v kiro-data:/root/.kiro_tools \
   kiro-tools
 
-# 或首次自动导入账号
+# 自定义端口和配置
+docker run -d -p 9000:9000 \
+  -e KIRO_PORT=9000 \
+  -e KIRO_API_KEY=sk-your-key \
+  -e KIRO_WEB_PASSWORD=your-password \
+  -v kiro-data:/root/.kiro_tools \
+  kiro-tools
+
+# 首次自动导入账号
 docker run -d -p 8045:8045 \
   -e KIRO_CREDS_FILE=/app/creds/kiro-auth-token.json \
   -v /path/to/creds:/app/creds:ro \
@@ -99,6 +117,22 @@ docker run -d -p 8045:8045 \
 ```
 
 **重要**：使用 volume 持久化账号数据，否则容器重启后账号丢失。
+
+## 环境变量
+
+所有环境变量都是可选的，未设置时使用默认值或配置文件中的值：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `KIRO_PORT` / `PORT` | 监听端口 | `8045` |
+| `KIRO_API_KEY` / `API_KEY` | 代理 API 密钥 | 自动生成 |
+| `KIRO_WEB_PASSWORD` / `WEB_PASSWORD` | Web UI 管理密码 | 与 API Key 相同 |
+| `KIRO_AUTH_MODE` / `AUTH_MODE` | 认证模式 (`off`, `strict`, `all_except_health`, `auto`) | `all_except_health` |
+| `KIRO_BIND_LOCAL_ONLY` | 是否仅本地访问 (`true`/`false`) | `false` |
+| `KIRO_DIST_PATH` | 前端资源路径 | `dist` |
+| `KIRO_CREDS_FILE` | 凭证文件路径（仅首次导入） | 无 |
+
+**注意**：环境变量会覆盖配置文件中的值，并在首次设置后持久化到配置文件。
 
 ## 安全特性
 
