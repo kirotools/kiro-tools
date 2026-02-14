@@ -885,6 +885,12 @@ async fn admin_get_logs(
         })?;
     let logs =
         proxy_db::get_logs_filtered(&params.filter, params.errors_only, limit, params.offset)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|log| log.redacted())
+                    .collect::<Vec<_>>()
+            })
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1247,7 +1253,7 @@ async fn admin_get_proxy_log_detail(
             .await;
 
     match res {
-        Ok(Ok(log)) => Ok(Json(log)),
+        Ok(Ok(log)) => Ok(Json(log.redacted())),
         Ok(Err(e)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),
@@ -1288,7 +1294,9 @@ async fn admin_get_proxy_logs_filtered(
     .await;
 
     match res {
-        Ok(Ok(logs)) => Ok(Json(logs)),
+        Ok(Ok(logs)) => Ok(Json(
+            logs.into_iter().map(|log| log.redacted()).collect::<Vec<_>>()
+        )),
         Ok(Err(e)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),

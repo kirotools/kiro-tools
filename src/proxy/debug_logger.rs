@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
+use crate::proxy::redaction::redact_sensitive_text;
 
 /// Debug logging mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,12 +63,8 @@ impl DebugLogger {
 
         let path = self.debug_dir.join(format!("{trace_id}_request.json"));
 
-        let content = match serde_json::from_slice::<serde_json::Value>(raw_body) {
-            Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
-                String::from_utf8_lossy(raw_body).into_owned()
-            }),
-            Err(_) => String::from_utf8_lossy(raw_body).into_owned(),
-        };
+        let raw = String::from_utf8_lossy(raw_body).into_owned();
+        let content = redact_sensitive_text(&raw);
 
         if let Err(e) = fs::write(&path, content.as_bytes()).await {
             warn!(path = %path.display(), error = %e, "Failed to write request debug log");

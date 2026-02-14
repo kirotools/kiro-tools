@@ -383,6 +383,7 @@ async fn get_logs(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
 
     let logs = proxy_db::get_logs_filtered(&params.filter, params.errors_only, limit, params.offset)
+        .map(|items| items.into_iter().map(|log| log.redacted()).collect::<Vec<_>>())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
 
     Ok(Json(LogsResponse {

@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::collections::VecDeque;
 use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::proxy::redaction::redact_sensitive_text;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyRequestLog {
@@ -24,6 +25,22 @@ pub struct ProxyRequestLog {
     pub cache_read_input_tokens: Option<u32>,
     pub protocol: Option<String>,
     pub username: Option<String>,
+}
+
+impl ProxyRequestLog {
+    pub fn redacted(&self) -> Self {
+        let mut cloned = self.clone();
+        if let Some(request_body) = &cloned.request_body {
+            cloned.request_body = Some(redact_sensitive_text(request_body));
+        }
+        if let Some(response_body) = &cloned.response_body {
+            cloned.response_body = Some(redact_sensitive_text(response_body));
+        }
+        if let Some(error) = &cloned.error {
+            cloned.error = Some(redact_sensitive_text(error));
+        }
+        cloned
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

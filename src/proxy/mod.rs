@@ -21,6 +21,7 @@ pub mod debug_logger;
 pub mod http_client;
 pub mod tokenizer;
 pub mod model_resolver;
+pub mod redaction;
 
 pub use config::update_global_system_prompt_config;
 pub use config::ProxyAuthMode;

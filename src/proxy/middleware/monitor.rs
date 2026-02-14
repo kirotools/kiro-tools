@@ -7,6 +7,7 @@ use axum::{
 use std::time::Instant;
 use crate::proxy::server::AppState;
 use crate::proxy::monitor::ProxyRequestLog;
+use crate::proxy::redaction::redact_sensitive_text;
 use serde_json::Value;
 use crate::proxy::middleware::auth::UserTokenIdentity;
 use futures::StreamExt;
@@ -96,7 +97,7 @@ pub async fn monitor_middleware(
                     );
                 }
                 request_body_str = if let Ok(s) = std::str::from_utf8(&bytes) {
-                    Some(s.to_string())
+                    Some(redact_sensitive_text(s))
                 } else {
                     Some("[Binary Request Data]".to_string())
                 };
@@ -341,6 +342,7 @@ pub async fn monitor_middleware(
                         if let Some(usage) = json.get("usage")
                             .or(json.get("usageMetadata"))
                             .or(json.get("response").and_then(|r| r.get("usage")))
+                            .or(json.get("message").and_then(|m| m.get("usage")))
                         {
                             let new_input = usage.get("prompt_tokens")
                                 .or(usage.get("input_tokens"))
@@ -403,9 +405,13 @@ pub async fn monitor_middleware(
                 
                 if consolidated.is_empty() {
                     // Fallback: store raw SSE data if parsing failed
-                    log.response_body = Some(full_response.to_string());
+                    log.response_body = Some(redact_sensitive_text(full_response));
                 } else {
-                    log.response_body = Some(serde_json::to_string_pretty(&Value::Object(consolidated)).unwrap_or_else(|_| full_response.to_string()));
+                    log.response_body = Some(
+                        serde_json::to_string_pretty(&Value::Object(consolidated))
+                            .map(|v| redact_sensitive_text(&v))
+                            .unwrap_or_else(|_| redact_sensitive_text(full_response)),
+                    );
                 }
             } else {
                 log.response_body = Some(format!("[Binary Stream Data: {} bytes]", all_stream_data.len()));
@@ -421,6 +427,7 @@ pub async fn monitor_middleware(
                                 if let Some(usage) = json.get("usage")
                                     .or(json.get("usageMetadata"))
                                     .or(json.get("response").and_then(|r| r.get("usage")))
+                                    .or(json.get("message").and_then(|m| m.get("usage")))
                                 {
                                     log.input_tokens = usage.get("prompt_tokens")
                                         .or(usage.get("input_tokens"))
@@ -463,8 +470,11 @@ pub async fn monitor_middleware(
             Ok(bytes) => {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
                     if let Ok(json) = serde_json::from_str::<Value>(&s) {
-                        // Support OpenAI "usage" or legacy "usageMetadata"
-                        if let Some(usage) = json.get("usage").or(json.get("usageMetadata")) {
+                        // Support OpenAI "usage", legacy "usageMetadata", or Anthropic "message.usage"
+                        if let Some(usage) = json.get("usage")
+                            .or(json.get("usageMetadata"))
+                            .or(json.get("message").and_then(|m| m.get("usage")))
+                        {
                             log.input_tokens = usage.get("prompt_tokens")
                                 .or(usage.get("input_tokens"))
                                 .or(usage.get("promptTokenCount"))
@@ -491,7 +501,7 @@ pub async fn monitor_middleware(
                             }
                         }
                     }
-                    log.response_body = Some(s.to_string());
+                    log.response_body = Some(redact_sensitive_text(s));
                 } else {
                     log.response_body = Some("[Binary Response Data]".to_string());
                 }
