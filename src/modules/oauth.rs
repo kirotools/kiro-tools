@@ -299,7 +299,25 @@ pub async fn ensure_fresh_token(
         "Token expiring soon for account {:?}, refreshing...",
         account_id
     ));
-    let response = refresh_access_token(Some(&current_token.refresh_token), None, account_id).await?;
+
+    let rt = current_token.refresh_token.trim();
+    let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+    let response = if let Some(aid) = account_id {
+        if let Ok(account) = crate::modules::account::load_account(aid) {
+            refresh_access_token_with_source(
+                rt_opt,
+                account.creds_file.as_deref(),
+                account.sqlite_db.as_deref(),
+                Some(aid),
+            )
+            .await?
+        } else {
+            refresh_access_token(rt_opt, None, Some(aid)).await?
+        }
+    } else {
+        refresh_access_token(rt_opt, None, None).await?
+    };
 
     // Use new refresh_token if returned, otherwise keep the old one
     let new_refresh_token = response.refresh_token

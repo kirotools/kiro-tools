@@ -86,6 +86,89 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
+    fn expand_tilde_path(raw: &str) -> String {
+        if raw.starts_with('~') {
+            if let Some(home) = dirs::home_dir() {
+                return raw.replacen('~', &home.to_string_lossy(), 1);
+            }
+        }
+        raw.to_string()
+    }
+
+    fn fallback_creds_file_path() -> Option<String> {
+        if let Ok(p) = std::env::var("KIRO_CREDS_FILE") {
+            let expanded = Self::expand_tilde_path(&p);
+            if std::path::Path::new(&expanded).exists() {
+                return Some(expanded);
+            }
+        }
+
+        let home = dirs::home_dir()?;
+        let default_path = home
+            .join(".aws")
+            .join("sso")
+            .join("cache")
+            .join("kiro-auth-token.json");
+        if default_path.exists() {
+            return Some(default_path.to_string_lossy().to_string());
+        }
+        None
+    }
+
+    pub async fn get_refresh_inputs(
+        &self,
+        account_id: &str,
+    ) -> Option<(String, Option<String>, Option<String>)> {
+        let entry = self.tokens.get(account_id)?;
+        let path = entry.account_path.clone();
+        let in_mem_refresh = entry.refresh_token.clone();
+        drop(entry);
+
+        match Self::load_account_from_path(&path).await {
+            Ok(account) => Some((
+                account.token.refresh_token.clone(),
+                if account.creds_file.is_none() && account.sqlite_db.is_none() && self.tokens.len() == 1 {
+                    Self::fallback_creds_file_path().or(account.creds_file)
+                } else {
+                    account.creds_file
+                },
+                account.sqlite_db,
+            )),
+            Err(_) => Some((in_mem_refresh, None, None)),
+        }
+    }
+
+    pub async fn force_refresh_account_token(&self, account_id: &str) -> Result<crate::modules::oauth::TokenResponse, String> {
+        let refresh_lock = self
+            .refresh_locks
+            .entry(account_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _refresh_guard = refresh_lock.lock().await;
+
+        let (rt, creds_file, sqlite_db) = self
+            .get_refresh_inputs(account_id)
+            .await
+            .ok_or_else(|| "account_not_found".to_string())?;
+
+        let rt = rt.trim();
+        let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+        let token_res = crate::modules::oauth::refresh_access_token_with_source(
+            rt_opt,
+            creds_file.as_deref(),
+            sqlite_db.as_deref(),
+            Some(account_id),
+        )
+        .await?;
+
+        if let Err(e) = self.sync_refreshed_token(account_id, &token_res).await {
+            tracing::warn!("Failed to persist refreshed token for {}: {}", account_id, e);
+        }
+
+        Ok(token_res)
+    }
+
     async fn load_account_from_path(path: &PathBuf) -> Result<crate::models::Account, String> {
         let content = tokio::fs::read_to_string(path)
             .await
@@ -178,6 +261,7 @@ impl TokenManager {
     /// 从主应用账号目录加载所有账号
     pub async fn load_accounts(&self) -> Result<usize, String> {
         let accounts_dir = self.data_dir.join("accounts");
+        let index_path = self.data_dir.join("accounts.json");
 
         if !accounts_dir.exists() {
             return Err(format!("账号目录不存在: {:?}", accounts_dir));
@@ -191,6 +275,11 @@ impl TokenManager {
             *last_used = None;
         }
 
+        let allowed_ids: Option<std::collections::HashSet<String>> = std::fs::read_to_string(&index_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<crate::models::account::AccountIndex>(&content).ok())
+            .map(|idx| idx.accounts.into_iter().map(|a| a.id).collect());
+
         let entries = std::fs::read_dir(&accounts_dir)
             .map_err(|e| format!("读取账号目录失败: {}", e))?;
 
@@ -202,6 +291,15 @@ impl TokenManager {
 
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
+            }
+
+            if let Some(ref allow) = allowed_ids {
+                let stem = path.file_stem().and_then(|s| s.to_str());
+                if let Some(id) = stem {
+                    if !allow.contains(id) {
+                        continue;
+                    }
+                }
             }
 
             // 尝试加载账号
@@ -899,8 +997,21 @@ impl TokenManager {
                                 token.timestamp = entry.timestamp;
                             }
                         } else {
-                            match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), None, Some(&token.account_id))
+                            let (rt, creds_file, sqlite_db) = self
+                                .get_refresh_inputs(&token.account_id)
                                 .await
+                                .unwrap_or((token.refresh_token.clone(), None, None));
+
+                            let rt = rt.trim();
+                            let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+                            match crate::modules::oauth::refresh_access_token_with_source(
+                                rt_opt,
+                                creds_file.as_deref(),
+                                sqlite_db.as_deref(),
+                                Some(&token.account_id),
+                            )
+                            .await
                             {
                                 Ok(token_response) => {
                                     token.access_token = token_response.access_token.clone();
@@ -1265,7 +1376,22 @@ impl TokenManager {
                     }
                     tracing::debug!("Token already refreshed by another request, using cached token");
                 } else {
-                    match crate::modules::oauth::refresh_access_token(Some(&token.refresh_token), None, Some(&token.account_id)).await {
+                    let (rt, creds_file, sqlite_db) = self
+                        .get_refresh_inputs(&token.account_id)
+                        .await
+                        .unwrap_or((token.refresh_token.clone(), None, None));
+
+                    let rt = rt.trim();
+                    let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+                    match crate::modules::oauth::refresh_access_token_with_source(
+                        rt_opt,
+                        creds_file.as_deref(),
+                        sqlite_db.as_deref(),
+                        Some(&token.account_id),
+                    )
+                    .await
+                    {
                         Ok(token_response) => {
                             tracing::debug!("Token 刷新成功！");
 
@@ -1464,6 +1590,10 @@ impl TokenManager {
     pub fn get_first_account_region(&self) -> Option<String> {
         let first_id = self.tokens.iter().next().map(|e| e.key().clone())?;
         self.get_account_region(&first_id)
+    }
+
+    pub fn get_first_account_id(&self) -> Option<String> {
+        self.tokens.iter().next().map(|e| e.key().clone())
     }
 
     pub fn get_first_account_profile_arn(&self) -> Option<String> {

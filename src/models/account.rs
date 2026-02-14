@@ -52,6 +52,8 @@ pub struct Account {
     /// Path to the original credentials file (e.g., ~/.aws/sso/cache/kiro-auth-token.json)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creds_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_db: Option<String>,
     /// Whether to sync refreshed tokens back to the source credentials file
     #[serde(default)]
     pub sync_back: bool,
@@ -82,6 +84,7 @@ impl Account {
             custom_label: None,
             encrypted: false,
             creds_file: None,
+            sqlite_db: None,
             sync_back: false,
         }
     }

@@ -60,10 +60,12 @@ impl AccountService {
 
         // 5. 持久化
         let mut account =
-            modules::upsert_account(
+            modules::upsert_account_with_source(
                 user_info.email.clone(), 
                 user_info.get_display_name(), 
-                token
+                token,
+                creds_file.map(str::to_string),
+                sqlite_db.map(str::to_string),
             )?;
 
         // 6. [NEW] 自动获取配额信息（用于刷新时间排序）

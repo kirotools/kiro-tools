@@ -1608,9 +1608,21 @@ pub async fn handle_kiro_messages(
                     trace_id, attempt + 1, MAX_RETRIES, error_text);
 
                 if attempt < MAX_RETRIES - 1 {
-                    match crate::modules::oauth::refresh_access_token(
-                        None, None, Some(account_id)
-                    ).await {
+                    let (rt, creds_file, sqlite_db) = token_manager
+                        .get_refresh_inputs(account_id)
+                        .await
+                        .unwrap_or((String::new(), None, None));
+                    let rt = rt.trim();
+                    let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+                    match crate::modules::oauth::refresh_access_token_with_source(
+                        rt_opt,
+                        creds_file.as_deref(),
+                        sqlite_db.as_deref(),
+                        Some(account_id),
+                    )
+                    .await
+                    {
                         Ok(token_response) => {
                             current_token = token_response.access_token.clone();
                             let _ = token_manager.sync_refreshed_token(account_id, &token_response).await;
@@ -1637,9 +1649,21 @@ pub async fn handle_kiro_messages(
                     trace_id, attempt + 1, MAX_RETRIES, error_text);
 
                 if attempt < MAX_RETRIES - 1 {
-                    match crate::modules::oauth::refresh_access_token(
-                        None, None, Some(account_id)
-                    ).await {
+                    let (rt, creds_file, sqlite_db) = token_manager
+                        .get_refresh_inputs(account_id)
+                        .await
+                        .unwrap_or((String::new(), None, None));
+                    let rt = rt.trim();
+                    let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+                    match crate::modules::oauth::refresh_access_token_with_source(
+                        rt_opt,
+                        creds_file.as_deref(),
+                        sqlite_db.as_deref(),
+                        Some(account_id),
+                    )
+                    .await
+                    {
                         Ok(token_response) => {
                             current_token = token_response.access_token.clone();
                             let _ = token_manager.sync_refreshed_token(account_id, &token_response).await;

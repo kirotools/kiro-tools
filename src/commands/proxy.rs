@@ -128,6 +128,28 @@ pub async fn internal_start_proxy_service(
 
     let active_accounts = token_manager.load_accounts().await.unwrap_or(0);
 
+    if active_accounts > 0 {
+        let primary_id = token_manager
+            .get_preferred_account()
+            .await
+            .or_else(|| token_manager.get_first_account_id());
+
+        if let Some(aid) = primary_id {
+            let refresh_fut = token_manager.force_refresh_account_token(&aid);
+            match tokio::time::timeout(std::time::Duration::from_secs(20), refresh_fut).await {
+                Ok(Ok(_)) => {
+                    tracing::info!("Startup token refresh ok: {}", aid);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Startup token refresh failed ({}): {}", aid, e);
+                }
+                Err(_) => {
+                    tracing::warn!("Startup token refresh timed out: {}", aid);
+                }
+            }
+        }
+    }
+
     // Auto-import from KIRO_CREDS_FILE env var if no accounts exist (matching gateway behavior)
     let active_accounts = if active_accounts == 0 {
         if let Ok(creds_file) = std::env::var("KIRO_CREDS_FILE") {

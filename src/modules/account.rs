@@ -1098,7 +1098,7 @@ pub fn add_account(
     name: Option<String>,
     token: TokenData,
 ) -> Result<Account, String> {
-    add_account_with_source(email, name, token, None)
+    add_account_with_source(email, name, token, None, None)
 }
 
 pub fn add_account_with_source(
@@ -1106,6 +1106,7 @@ pub fn add_account_with_source(
     name: Option<String>,
     token: TokenData,
     creds_file: Option<String>,
+    sqlite_db: Option<String>,
 ) -> Result<Account, String> {
     let _lock = ACCOUNT_INDEX_LOCK
         .lock()
@@ -1125,6 +1126,10 @@ pub fn add_account_with_source(
     if let Some(path) = creds_file {
         account.creds_file = Some(path);
         account.sync_back = true;
+    }
+
+    if let Some(path) = sqlite_db {
+        account.sqlite_db = Some(path);
     }
 
     // Save account data
@@ -1157,7 +1162,7 @@ pub fn upsert_account(
     name: Option<String>,
     token: TokenData,
 ) -> Result<Account, String> {
-    upsert_account_with_source(email, name, token, None)
+    upsert_account_with_source(email, name, token, None, None)
 }
 
 pub fn upsert_account_with_source(
@@ -1165,6 +1170,7 @@ pub fn upsert_account_with_source(
     name: Option<String>,
     token: TokenData,
     creds_file: Option<String>,
+    sqlite_db: Option<String>,
 ) -> Result<Account, String> {
     let _lock = ACCOUNT_INDEX_LOCK
         .lock()
@@ -1190,6 +1196,10 @@ pub fn upsert_account_with_source(
                 if let Some(path) = creds_file {
                     account.creds_file = Some(path);
                     account.sync_back = true;
+                }
+
+                if let Some(path) = sqlite_db {
+                    account.sqlite_db = Some(path);
                 }
                 
                 if account.disabled
@@ -1222,6 +1232,10 @@ pub fn upsert_account_with_source(
                     account.creds_file = Some(path);
                     account.sync_back = true;
                 }
+
+                if let Some(path) = sqlite_db {
+                    account.sqlite_db = Some(path);
+                }
                 
                 save_account(&account)?;
 
@@ -1241,7 +1255,7 @@ pub fn upsert_account_with_source(
 
     // Release lock, let add_account handle it
     drop(_lock);
-    add_account_with_source(email, name, token, creds_file)
+    add_account_with_source(email, name, token, creds_file, sqlite_db)
 }
 
 /// Delete account
@@ -1629,8 +1643,16 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
                 ));
 
                 // Force refresh
-                let token_res = match oauth::refresh_access_token(Some(&account.token.refresh_token), None, Some(&account.id))
-                    .await
+                let rt = account.token.refresh_token.trim();
+                let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+                let token_res = match oauth::refresh_access_token_with_source(
+                    rt_opt,
+                    account.creds_file.as_deref(),
+                    account.sqlite_db.as_deref(),
+                    Some(&account.id),
+                )
+                .await
                 {
                     Ok(t) => t,
                     Err(e) => {
@@ -1651,7 +1673,10 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
 
                 let new_token = TokenData::new(
                     token_res.access_token.clone(),
-                    account.token.refresh_token.clone(),
+                    token_res
+                        .refresh_token
+                        .clone()
+                        .unwrap_or_else(|| account.token.refresh_token.clone()),
                     token_res.expires_in,
                     account.token.email.clone(),
                     account.token.project_id.clone(), // Keep original project_id
