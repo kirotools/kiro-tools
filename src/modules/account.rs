@@ -663,6 +663,12 @@ const ACCOUNTS_DIR: &str = "accounts";
 
 /// Get data directory path
 pub fn get_data_dir() -> Result<PathBuf, String> {
+    // [FIX] 优先使用启动时固定的数据目录
+    // 这确保了整个程序生命周期内数据目录的一致性
+    if let Ok(fixed_path) = std::env::var("KIRO_DATA_DIR_FIXED") {
+        return Ok(PathBuf::from(fixed_path));
+    }
+
     // [NEW] Support custom data directory via environment variable
     if let Ok(env_path) = std::env::var("KIRO_DATA_DIR") {
         if !env_path.trim().is_empty() {

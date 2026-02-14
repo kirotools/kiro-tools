@@ -5,6 +5,7 @@ use crate::modules;
 pub mod proxy;
 pub mod cloudflared;
 pub mod user_token;
+pub mod account_repair;
 
 pub async fn list_accounts() -> Result<Vec<Account>, String> {
     modules::list_accounts()

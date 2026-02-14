@@ -44,6 +44,30 @@ async fn main() {
 
     logger::init_logger();
 
+    // [FIX] 检查是否是修复命令
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--repair-accounts" {
+        match commands::account_repair::repair_account_index() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                error!("账号修复失败: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // [FIX] 在启动时固定数据目录，防止后续调用时环境变量变化
+    let data_dir = modules::account::get_data_dir()
+        .expect("Failed to get data directory");
+    
+    // 设置固定的数据目录环境变量
+    std::env::set_var("KIRO_DATA_DIR_FIXED", data_dir.to_str().unwrap());
+    
+    info!("✓ Data directory fixed at: {:?}", data_dir);
+    
+    // [FIX] 检查数据目录是否可写
+    check_data_directory_writable(&data_dir);
+
     if let Err(e) = modules::token_stats::init_db() {
         error!("Failed to initialize token stats database: {}", e);
     }
@@ -181,4 +205,23 @@ async fn main() {
 
     tokio::signal::ctrl_c().await.ok();
     info!("Shutting down");
+}
+
+/// [FIX] 检查数据目录是否可写
+fn check_data_directory_writable(data_dir: &std::path::PathBuf) {
+    let test_file = data_dir.join(".write_test");
+    if let Err(e) = std::fs::write(&test_file, "test") {
+        error!("⚠️  CRITICAL: Data directory is not writable: {}", e);
+        error!("⚠️  Accounts may be LOST on restart!");
+        error!("⚠️  Directory: {:?}", data_dir);
+        error!("⚠️  Please check permissions and disk space.");
+        std::process::exit(1);
+    }
+    let _ = std::fs::remove_file(&test_file);
+    
+    // 检查环境变量是否设置
+    if std::env::var("KIRO_DATA_DIR").is_ok() {
+        tracing::warn!("⚠️  KIRO_DATA_DIR environment variable is set");
+        tracing::warn!("⚠️  Make sure it's consistent across restarts!");
+    }
 }
