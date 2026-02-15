@@ -10,7 +10,12 @@ use std::fs;
 /// 修复账号索引与文件的不一致
 pub fn repair_account_index() -> Result<(), String> {
     println!("=== Kiro Tools 账号修复工具 ===\n");
-    
+
+    // [FIX] 获取全局锁，防止与运行中的服务器冲突
+    // 这是关键修复：确保修复工具不会与服务器进程产生竞争
+    let _lock = crate::modules::account::get_account_index_lock()
+        .map_err(|e| format!("无法获取索引锁: {}. 请确保服务器未运行", e))?;
+
     let data_dir = get_data_dir()?;
     let accounts_dir = data_dir.join("accounts");
     
@@ -117,6 +122,16 @@ pub fn repair_account_index() -> Result<(), String> {
     }
 
     // 6. 保存修复后的索引
+    // [FIX] 备份原始索引
+    let index_path = data_dir.join("accounts.json");
+    if index_path.exists() {
+        let backup_path = data_dir.join(format!("accounts.json.backup.{}",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")));
+        if let Ok(_) = std::fs::copy(&index_path, &backup_path) {
+            println!("  ✓ 已备份原始索引到: {}", backup_path.display());
+        }
+    }
+
     save_account_index(&index)?;
     println!("\n✓ 索引已修复并保存");
     println!("✓ 当前索引包含 {} 个账号", index.accounts.len());

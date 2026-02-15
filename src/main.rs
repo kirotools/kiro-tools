@@ -60,8 +60,12 @@ async fn main() {
     let data_dir = modules::account::get_data_dir()
         .expect("Failed to get data directory");
     
-    // 设置固定的数据目录环境变量
-    std::env::set_var("KIRO_DATA_DIR_FIXED", data_dir.to_str().unwrap());
+    // [FIX] 设置固定的数据目录环境变量，使用 to_string_lossy 避免 panic
+    // 关键修复：避免在非UTF-8路径上panic
+    std::env::set_var(
+        "KIRO_DATA_DIR_FIXED",
+        data_dir.to_string_lossy().as_ref()
+    );
     
     info!("✓ Data directory fixed at: {:?}", data_dir);
     
