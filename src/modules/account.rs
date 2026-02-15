@@ -654,7 +654,15 @@ mod tests {
 }
 
 /// Global account write lock to prevent corruption during concurrent operations
-static ACCOUNT_INDEX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+pub(crate) static ACCOUNT_INDEX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+/// Get account index lock for external use (e.g., repair tool)
+/// [FIX] 导出锁访问函数，供修复工具使用
+pub fn get_account_index_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    ACCOUNT_INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("failed_to_acquire_lock: {}", e))
+}
 
 // ... existing constants ...
 const DATA_DIR: &str = ".kiro_tools";
@@ -663,6 +671,12 @@ const ACCOUNTS_DIR: &str = "accounts";
 
 /// Get data directory path
 pub fn get_data_dir() -> Result<PathBuf, String> {
+    // [FIX] 优先使用启动时固定的数据目录
+    // 这确保了整个程序生命周期内数据目录的一致性
+    if let Ok(fixed_path) = std::env::var("KIRO_DATA_DIR_FIXED") {
+        return Ok(PathBuf::from(fixed_path));
+    }
+
     // [NEW] Support custom data directory via environment variable
     if let Ok(env_path) = std::env::var("KIRO_DATA_DIR") {
         if !env_path.trim().is_empty() {
@@ -907,24 +921,21 @@ fn try_save_recovered_index(
         }
     }
 
-    // Try to acquire lock without blocking - if we can't get it, skip saving
-    match ACCOUNT_INDEX_LOCK.try_lock() {
-        Ok(_guard) => {
-            if let Err(e) = save_account_index_in_dir(data_dir, index) {
-                crate::modules::logger::log_warn(&format!(
-                    "Failed to save recovered index: {}. Will retry on next load.",
-                    e
-                ));
-            } else {
-                crate::modules::logger::log_info("Successfully saved recovered index");
-            }
-        }
-        Err(_) => {
-            crate::modules::logger::log_warn(
-                "Could not acquire lock to save recovered index. Will retry on next load."
-            );
-        }
-    }
+    // [FIX] 使用阻塞式 lock 确保索引一定被保存
+    // 这是关键修复：确保恢复的索引不会因为锁竞争而丢失
+    let _guard = ACCOUNT_INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+    save_account_index_in_dir(data_dir, index).map_err(|e| {
+        crate::modules::logger::log_warn(&format!(
+            "Failed to save recovered index: {}",
+            e
+        ));
+        e
+    })?;
+
+    crate::modules::logger::log_info("Successfully saved recovered index");
 
     Ok(())
 }
