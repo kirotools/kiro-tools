@@ -94,6 +94,13 @@ pub fn normalize_model_for_stats(model: &str) -> String {
         return caps[1].to_string();
     }
 
+    let re_standard_dot =
+        Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})(?:-(?:\d{8}|latest|\d+))?$")
+            .unwrap();
+    if let Some(caps) = re_standard_dot.captures(&lower) {
+        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+    }
+
     let re_no_minor_with_date =
         Regex::new(r"^(claude-(?:haiku|sonnet|opus)-\d+)-\d{8}$").unwrap();
     if let Some(caps) = re_no_minor_with_date.captures(&lower) {
@@ -111,7 +118,28 @@ pub fn normalize_model_for_stats(model: &str) -> String {
         Regex::new(r"^(claude-(?:\d+\.\d+-)?(?:haiku|sonnet|opus)(?:-\d+\.\d+)?)-\d{8}$")
             .unwrap();
     if let Some(caps) = re_dot_with_date.captures(&lower) {
-        return caps[1].to_string();
+        let base = caps[1].to_string();
+        let re_family_dot =
+            Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})$").unwrap();
+        if let Some(m) = re_family_dot.captures(&base) {
+            return format!("claude-{}-{}-{}", &m[1], &m[2], &m[3]);
+        }
+        let re_legacy_dot = Regex::new(r"^claude-(\d+)\.(\d+)-(haiku|sonnet|opus)$").unwrap();
+        if let Some(m) = re_legacy_dot.captures(&base) {
+            return format!("claude-{}-{}-{}", &m[1], &m[2], &m[3]);
+        }
+        return base;
+    }
+
+    let re_family_dot =
+        Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})$").unwrap();
+    if let Some(caps) = re_family_dot.captures(&lower) {
+        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+    }
+
+    let re_legacy_dot = Regex::new(r"^claude-(\d+)\.(\d+)-(haiku|sonnet|opus)$").unwrap();
+    if let Some(caps) = re_legacy_dot.captures(&lower) {
+        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
     }
 
     lower
