@@ -77,6 +77,14 @@ fn connect_db() -> Result<Connection, String> {
 }
 
 pub fn normalize_model_for_stats(model: &str) -> String {
+    fn canonical_family_model(family: &str, major: &str, minor: Option<&str>) -> String {
+        match minor {
+            Some("0") => format!("claude-{}-{}", family, major),
+            Some(m) => format!("claude-{}-{}-{}", family, major, m),
+            None => format!("claude-{}-{}", family, major),
+        }
+    }
+
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return "unknown".to_string();
@@ -88,58 +96,43 @@ pub fn normalize_model_for_stats(model: &str) -> String {
     }
 
     let re_standard_with_suffix =
-        Regex::new(r"^(claude-(?:haiku|sonnet|opus)-\d+-\d{1,2})-(?:\d{8}|latest|\d+)$")
+        Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)-(\d{1,2})(?:-(?:\d{8}|latest|\d+))?$")
             .unwrap();
     if let Some(caps) = re_standard_with_suffix.captures(&lower) {
-        return caps[1].to_string();
+        return canonical_family_model(&caps[1], &caps[2], Some(&caps[3]));
     }
 
     let re_standard_dot =
         Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})(?:-(?:\d{8}|latest|\d+))?$")
             .unwrap();
     if let Some(caps) = re_standard_dot.captures(&lower) {
-        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+        return canonical_family_model(&caps[1], &caps[2], Some(&caps[3]));
     }
 
     let re_no_minor_with_date =
-        Regex::new(r"^(claude-(?:haiku|sonnet|opus)-\d+)-\d{8}$").unwrap();
+        Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)(?:-\d{8})?$").unwrap();
     if let Some(caps) = re_no_minor_with_date.captures(&lower) {
-        return caps[1].to_string();
+        return canonical_family_model(&caps[1], &caps[2], None);
     }
 
     let re_legacy_with_suffix =
-        Regex::new(r"^(claude-\d+-\d+-(?:haiku|sonnet|opus))-(?:\d{8}|latest|\d+)$")
+        Regex::new(r"^claude-(\d+)-(\d+)-(haiku|sonnet|opus)(?:-(?:\d{8}|latest|\d+))?$")
             .unwrap();
     if let Some(caps) = re_legacy_with_suffix.captures(&lower) {
-        return caps[1].to_string();
-    }
-
-    let re_dot_with_date =
-        Regex::new(r"^(claude-(?:\d+\.\d+-)?(?:haiku|sonnet|opus)(?:-\d+\.\d+)?)-\d{8}$")
-            .unwrap();
-    if let Some(caps) = re_dot_with_date.captures(&lower) {
-        let base = caps[1].to_string();
-        let re_family_dot =
-            Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})$").unwrap();
-        if let Some(m) = re_family_dot.captures(&base) {
-            return format!("claude-{}-{}-{}", &m[1], &m[2], &m[3]);
-        }
-        let re_legacy_dot = Regex::new(r"^claude-(\d+)\.(\d+)-(haiku|sonnet|opus)$").unwrap();
-        if let Some(m) = re_legacy_dot.captures(&base) {
-            return format!("claude-{}-{}-{}", &m[1], &m[2], &m[3]);
-        }
-        return base;
+        return canonical_family_model(&caps[3], &caps[1], Some(&caps[2]));
     }
 
     let re_family_dot =
         Regex::new(r"^claude-(haiku|sonnet|opus)-(\d+)\.(\d{1,2})$").unwrap();
     if let Some(caps) = re_family_dot.captures(&lower) {
-        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+        return canonical_family_model(&caps[1], &caps[2], Some(&caps[3]));
     }
 
-    let re_legacy_dot = Regex::new(r"^claude-(\d+)\.(\d+)-(haiku|sonnet|opus)$").unwrap();
+    let re_legacy_dot =
+        Regex::new(r"^claude-(\d+)\.(\d+)-(haiku|sonnet|opus)(?:-(?:\d{8}|latest|\d+))?$")
+            .unwrap();
     if let Some(caps) = re_legacy_dot.captures(&lower) {
-        return format!("claude-{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+        return canonical_family_model(&caps[3], &caps[1], Some(&caps[2]));
     }
 
     lower
@@ -793,5 +786,30 @@ mod tests {
         // This would need a test database setup
         // For now, just verify the module compiles
         assert!(true);
+    }
+
+    #[test]
+    fn test_normalize_sonnet_minor_and_date_variants() {
+        assert_eq!(normalize_model_for_stats("claude-sonnet-4-5"), "claude-sonnet-4-5");
+        assert_eq!(normalize_model_for_stats("claude-sonnet-4.5"), "claude-sonnet-4-5");
+        assert_eq!(
+            normalize_model_for_stats("claude-sonnet-4-5-20250929"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            normalize_model_for_stats("claude-sonnet-4.5-20250929"),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_integer_version_and_minor_zero() {
+        assert_eq!(normalize_model_for_stats("claude-sonnet-4"), "claude-sonnet-4");
+        assert_eq!(normalize_model_for_stats("claude-sonnet-4.0"), "claude-sonnet-4");
+        assert_eq!(normalize_model_for_stats("claude-sonnet-4-0"), "claude-sonnet-4");
+        assert_eq!(
+            normalize_model_for_stats("claude-sonnet-4-20250929"),
+            "claude-sonnet-4"
+        );
     }
 }
