@@ -3487,9 +3487,18 @@ mod tests {
             &std::fs::read_to_string(&account_path).unwrap()
         ).unwrap();
 
-        assert_eq!(saved["token"]["access_token"], "new-access-token");
-        assert_eq!(saved["token"]["refresh_token"], "new-refresh-token");
+        let saved_access = saved["token"]["access_token"].as_str().unwrap();
+        let saved_refresh = saved["token"]["refresh_token"].as_str().unwrap();
+        assert_eq!(
+            crate::utils::crypto::decrypt_string(saved_access).unwrap(),
+            "new-access-token"
+        );
+        assert_eq!(
+            crate::utils::crypto::decrypt_string(saved_refresh).unwrap(),
+            "new-refresh-token"
+        );
         assert_eq!(saved["token"]["expires_in"], 7200);
+        assert_eq!(saved["encrypted"], true);
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -3537,9 +3546,17 @@ mod tests {
             &std::fs::read_to_string(&account_path).unwrap()
         ).unwrap();
 
-        assert_eq!(saved["token"]["access_token"], "new-access");
-        // Old refresh_token should be preserved
-        assert_eq!(saved["token"]["refresh_token"], "keep-this-refresh");
+        let saved_access = saved["token"]["access_token"].as_str().unwrap();
+        let saved_refresh = saved["token"]["refresh_token"].as_str().unwrap();
+        assert_eq!(
+            crate::utils::crypto::decrypt_string(saved_access).unwrap(),
+            "new-access"
+        );
+        assert_eq!(
+            crate::utils::crypto::decrypt_string(saved_refresh).unwrap(),
+            "keep-this-refresh"
+        );
+        assert_eq!(saved["encrypted"], true);
 
         std::fs::remove_dir_all(&tmp).ok();
     }

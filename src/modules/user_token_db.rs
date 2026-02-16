@@ -695,7 +695,9 @@ mod tests {
 
     #[test]
     fn test_create_and_query_token() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 

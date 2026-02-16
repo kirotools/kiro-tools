@@ -180,6 +180,32 @@ jobs:
           dpkg-deb --build "${PKG_DIR}"
           mv "release/deb/kiro-tools_${VERSION}_amd64.deb" release/
 
+      - name: Smoke test deb package
+        run: |
+          set -euo pipefail
+          DEB_PATH=$(ls release/*.deb | head -n 1)
+          test -f "$DEB_PATH"
+
+          SMOKE_DIR="/tmp/kiro-deb-smoke"
+          rm -rf "$SMOKE_DIR"
+          mkdir -p "$SMOKE_DIR"
+          dpkg-deb -x "$DEB_PATH" "$SMOKE_DIR"
+
+          test -x "$SMOKE_DIR/usr/bin/kiro-tools"
+
+          LOG_FILE="/tmp/kiro-deb-smoke.log"
+          KIRO_PORT=18045 KIRO_BIND_LOCAL_ONLY=true timeout 8s "$SMOKE_DIR/usr/bin/kiro-tools" >"$LOG_FILE" 2>&1 || rc=$?
+          if [ "${rc:-0}" -ne 0 ] && [ "${rc:-0}" -ne 124 ]; then
+            cat "$LOG_FILE"
+            exit "${rc}"
+          fi
+
+          if ! grep -Eq "Proxy service starting|反代服务器启动" "$LOG_FILE"; then
+            cat "$LOG_FILE"
+            echo "Smoke test failed: kiro-tools did not reach startup logs"
+            exit 1
+          fi
+
       - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
@@ -225,6 +251,30 @@ jobs:
           Copy-Item -Recurse webui/dist release/kiro-tools-windows-amd64/dist
           Copy-Item README.md, LICENSE, start.ps1 release/kiro-tools-windows-amd64/
           Compress-Archive -Path release/kiro-tools-windows-amd64 -DestinationPath release/kiro-tools-windows-amd64.zip
+
+      - name: Smoke test windows exe
+        shell: pwsh
+        run: |
+          $exe = "target/release/kiro-tools.exe"
+          if (!(Test-Path $exe)) {
+            throw "Windows executable not found: $exe"
+          }
+
+          $env:KIRO_PORT = "18045"
+          $env:KIRO_BIND_LOCAL_ONLY = "true"
+          $stdoutLog = Join-Path $env:RUNNER_TEMP "kiro-exe-smoke.stdout.log"
+          $stderrLog = Join-Path $env:RUNNER_TEMP "kiro-exe-smoke.stderr.log"
+
+          $proc = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+          Start-Sleep -Seconds 8
+
+          if ($proc.HasExited) {
+            Get-Content $stdoutLog -ErrorAction SilentlyContinue
+            Get-Content $stderrLog -ErrorAction SilentlyContinue
+            throw "Smoke test failed: kiro-tools.exe exited early with code $($proc.ExitCode)"
+          }
+
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 
       - name: Upload zip
         uses: actions/upload-artifact@v4

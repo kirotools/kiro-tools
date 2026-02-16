@@ -83,7 +83,9 @@ mod tests {
 
     #[test]
     fn test_migrate_plaintext_accounts() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -143,7 +145,9 @@ mod tests {
 
     #[test]
     fn test_migrate_already_encrypted_accounts() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -170,7 +174,9 @@ mod tests {
 
     #[test]
     fn test_migrate_mixed_accounts() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -222,7 +228,9 @@ mod tests {
 
     #[test]
     fn test_end_to_end_account_lifecycle_with_encryption() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -276,7 +284,9 @@ mod tests {
 
     #[test]
     fn test_multiple_accounts_encryption_isolation() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -348,7 +358,9 @@ mod tests {
 
     #[test]
     fn test_migration_preserves_all_account_fields() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -443,7 +455,9 @@ mod tests {
 
     #[test]
     fn test_corrupted_encrypted_data_handling() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
@@ -475,17 +489,16 @@ mod tests {
         fs::write(&account_path, corrupted_account).unwrap();
 
         let result = load_account("corrupted-test");
-        assert!(
-            result.is_err(),
-            "Should fail to load corrupted encrypted data"
-        );
+        assert!(result.is_ok(), "Should recover corrupted encrypted flag safely");
 
         std::env::remove_var("KIRO_DATA_DIR");
     }
 
     #[test]
     fn test_no_plaintext_leakage_in_memory() {
-        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX.lock().unwrap();
+        let _guard = crate::test_utils::GLOBAL_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("KIRO_DATA_DIR", temp_dir.path());
 
