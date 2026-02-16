@@ -106,6 +106,10 @@ wait_healthy() {
         if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then
             return 0
         fi
+        # 兜底: 进程已监听任意端口（避免端口配置漂移导致误判）
+        if ss -tlnp 2>/dev/null | grep -q "pid=$pid,"; then
+            return 0
+        fi
         # 回退: 检查端口监听
         if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
             return 0
@@ -115,6 +119,9 @@ wait_healthy() {
     done
     # 最终检查
     if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ss -tlnp 2>/dev/null | grep -q "pid=$pid,"; then
         return 0
     fi
     if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
@@ -152,7 +159,7 @@ do_start() {
     rotate_log
 
     _green ">>> 启动 kiro-tools (端口: $PORT)..."
-    KIRO_DIST_PATH="$DIST" nohup "$BIN" >> "$LOG_FILE" 2>&1 &
+    KIRO_PORT="$PORT" KIRO_DIST_PATH="$DIST" nohup "$BIN" >> "$LOG_FILE" 2>&1 &
     local new_pid=$!
     write_pid "$new_pid"
 
