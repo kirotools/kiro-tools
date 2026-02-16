@@ -306,3 +306,154 @@ async fn test_concurrent_streams_completeness() {
         println!("  ⚠ 所有请求都失败了（可能没有可用账号），跳过断言");
     }
 }
+
+// ============================================================================
+// 测试 4: Fake Reasoning — 流式 SSE 中 thinking 事件检测
+// ============================================================================
+
+/// Enhanced SSE consumer that tracks thinking events.
+/// Returns (text_content, thinking_content, got_message_stop, got_done, event_count, has_thinking_delta)
+async fn consume_sse_stream_with_thinking(
+    response: reqwest::Response,
+) -> Result<(String, String, bool, bool, usize, bool), String> {
+    use futures::StreamExt;
+
+    let mut stream = response.bytes_stream();
+    let mut full_data = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream chunk error: {}", e))?;
+        full_data.extend_from_slice(&chunk);
+    }
+
+    let text = String::from_utf8_lossy(&full_data).to_string();
+
+    let mut content = String::new();
+    let mut thinking_content = String::new();
+    let mut got_message_stop = false;
+    let mut got_done = false;
+    let mut event_count = 0;
+    let mut has_thinking_delta = false;
+
+    for line in text.lines() {
+        if line.starts_with("data: ") {
+            let data = line.trim_start_matches("data: ").trim();
+            if data == "[DONE]" {
+                got_done = true;
+                continue;
+            }
+            event_count += 1;
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match event_type {
+                    "content_block_delta" => {
+                        if let Some(delta) = json.get("delta") {
+                            let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                                        content.push_str(t);
+                                    }
+                                }
+                                "thinking_delta" => {
+                                    has_thinking_delta = true;
+                                    if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                        thinking_content.push_str(t);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "content_block_start" => {
+                        if let Some(cb) = json.get("content_block") {
+                            if cb.get("type").and_then(|v| v.as_str()) == Some("thinking") {
+                                has_thinking_delta = true;
+                            }
+                        }
+                    }
+                    "message_stop" => {
+                        got_message_stop = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok((content, thinking_content, got_message_stop, got_done, event_count, has_thinking_delta))
+}
+
+#[tokio::test]
+async fn test_stream_thinking_detection() {
+    // This test detects whether the server emits thinking blocks in SSE output.
+    // It doesn't assert a specific mode (inject vs strip) — it merely reports
+    // what the server is currently configured to do and validates consistency.
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/messages", base_url());
+
+    // Use a prompt that's likely to trigger thinking if enabled
+    let body = make_request_body(true, "What is 123 * 456? Think step by step.");
+
+    println!(">>> Sending streaming request to test thinking detection...");
+    let start = std::time::Instant::now();
+
+    let resp = match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key()))
+        .header("Content-Type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            println!("⚠ Request failed (service may not be running): {}", e);
+            println!("  Skipping test. Ensure service is running on {}", base_url());
+            return;
+        }
+    };
+
+    let status = resp.status().as_u16();
+    if status != 200 {
+        let body = resp.text().await.unwrap_or_default();
+        println!("⚠ Non-200 response: {}", body);
+        println!("  Skipping test (may not have available accounts)");
+        return;
+    }
+
+    let (content, thinking_content, got_stop, got_done, event_count, has_thinking) =
+        consume_sse_stream_with_thinking(resp)
+            .await
+            .expect("SSE stream parsing failed");
+
+    let elapsed = start.elapsed();
+
+    println!(">>> Thinking detection results:");
+    println!("  Elapsed: {:.1}s", elapsed.as_secs_f64());
+    println!("  Events: {}", event_count);
+    println!("  Has thinking blocks: {}", has_thinking);
+    println!("  Content length: {} chars", content.len());
+    println!("  Thinking length: {} chars", thinking_content.len());
+    println!("  message_stop: {}", got_stop);
+    println!("  [DONE]: {}", got_done);
+
+    // Basic structural assertions
+    assert!(event_count > 0, "Should receive at least one SSE event");
+    assert!(!content.is_empty(), "Content should not be empty");
+    assert!(got_stop, "Stream should end with message_stop");
+    assert!(got_done, "Stream should end with [DONE]");
+
+    // Report thinking state (informational — both modes are valid)
+    if has_thinking {
+        println!("  ✓ Server has fake reasoning ENABLED (inject mode) — thinking blocks detected");
+        assert!(!thinking_content.is_empty(), "Thinking content should not be empty when thinking blocks are present");
+    } else {
+        println!("  ✓ Server has fake reasoning DISABLED or in strip mode — no thinking blocks");
+        assert!(thinking_content.is_empty(), "Thinking content should be empty when no thinking blocks");
+    }
+}
+
