@@ -1,13 +1,11 @@
 /// Finite state machine parser that extracts thinking blocks from streaming text.
 ///
-/// Supports `<thinking>`, `<think>`, and `<reasoning>` tag formats.
+/// Supports configurable tag formats (default: `<thinking>`, `<think>`, `<reasoning>`, `<thought>`).
 /// Handles tags split across multiple chunks via cautious buffering.
+/// Tag set is driven by configuration, matching `kiro-gateway`'s dynamic approach.
 
-const TAG_PAIRS: [(&str, &str); 3] = [
-    ("<thinking>", "</thinking>"),
-    ("<think>", "</think>"),
-    ("<reasoning>", "</reasoning>"),
-];
+/// Default open tags — used when no custom tags are provided.
+const DEFAULT_OPEN_TAGS: [&str; 4] = ["<thinking>", "<think>", "<reasoning>", "<thought>"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThinkingEvent {
@@ -29,38 +27,67 @@ enum ThinkingState {
 pub struct ThinkingParser {
     state: ThinkingState,
     buffer: String,
-    /// Index into TAG_PAIRS for the currently matched open tag
+    /// Index into tag_pairs for the currently matched open tag
     active_pair: Option<usize>,
-}
-
-// --- prefix / match helpers (no allocations) ---
-
-fn is_prefix_of_any_open_tag(s: &str) -> bool {
-    TAG_PAIRS
-        .iter()
-        .any(|(open, _)| open.starts_with(s) && *open != s)
-}
-
-fn matches_any_open_tag(s: &str) -> Option<usize> {
-    TAG_PAIRS.iter().position(|(open, _)| *open == s)
-}
-
-fn is_prefix_of_close_tag(s: &str, pair_idx: usize) -> bool {
-    let close = TAG_PAIRS[pair_idx].1;
-    close.starts_with(s) && close != s
-}
-
-fn matches_close_tag(s: &str, pair_idx: usize) -> bool {
-    TAG_PAIRS[pair_idx].1 == s
+    /// Dynamic tag pairs: (open_tag, close_tag)
+    tag_pairs: Vec<(String, String)>,
 }
 
 impl ThinkingParser {
+    /// Create a parser with default tag set.
     pub fn new() -> Self {
+        let tag_pairs = DEFAULT_OPEN_TAGS
+            .iter()
+            .map(|open| {
+                let close = open.replace('<', "</");
+                (open.to_string(), close)
+            })
+            .collect();
         Self {
             state: ThinkingState::Normal,
             buffer: String::new(),
             active_pair: None,
+            tag_pairs,
         }
+    }
+
+    /// Create a parser with custom open tags (closing tags are derived automatically).
+    /// e.g. `["<thinking>", "<think>"]` → `[("<thinking>","</thinking>"), ("<think>","</think>")]`
+    pub fn with_tags(open_tags: &[String]) -> Self {
+        let tag_pairs = open_tags
+            .iter()
+            .map(|open| {
+                let close = open.replace('<', "</");
+                (open.clone(), close)
+            })
+            .collect();
+        Self {
+            state: ThinkingState::Normal,
+            buffer: String::new(),
+            active_pair: None,
+            tag_pairs,
+        }
+    }
+
+    // --- prefix / match helpers ---
+
+    fn is_prefix_of_any_open_tag(&self, s: &str) -> bool {
+        self.tag_pairs
+            .iter()
+            .any(|(open, _)| open.starts_with(s) && open.as_str() != s)
+    }
+
+    fn matches_any_open_tag(&self, s: &str) -> Option<usize> {
+        self.tag_pairs.iter().position(|(open, _)| open == s)
+    }
+
+    fn is_prefix_of_close_tag(&self, s: &str, pair_idx: usize) -> bool {
+        let close = &self.tag_pairs[pair_idx].1;
+        close.starts_with(s) && close.as_str() != s
+    }
+
+    fn matches_close_tag(&self, s: &str, pair_idx: usize) -> bool {
+        self.tag_pairs[pair_idx].1 == s
     }
 
     /// Process a text chunk and return resulting events.
@@ -83,14 +110,14 @@ impl ThinkingParser {
                 ThinkingState::PotentialOpen => {
                     self.buffer.push(ch);
 
-                    if let Some(pair_idx) = matches_any_open_tag(&self.buffer) {
+                    if let Some(pair_idx) = self.matches_any_open_tag(&self.buffer) {
                         // Flush accumulated text before the tag
                         flush_accum(&mut text_accum, &mut events, &self.state);
                         self.active_pair = Some(pair_idx);
                         self.buffer.clear();
                         self.state = ThinkingState::InThinking;
                         events.push(ThinkingEvent::ThinkingStart);
-                    } else if !is_prefix_of_any_open_tag(&self.buffer) {
+                    } else if !self.is_prefix_of_any_open_tag(&self.buffer) {
                         // Can't match any open tag — dump buffer as normal text
                         text_accum.push_str(&self.buffer);
                         self.buffer.clear();
@@ -117,14 +144,14 @@ impl ThinkingParser {
                         .active_pair
                         .expect("active_pair must be set in PotentialClose");
 
-                    if matches_close_tag(&self.buffer, pair_idx) {
+                    if self.matches_close_tag(&self.buffer, pair_idx) {
                         // Flush any thinking delta before the close tag
                         flush_accum(&mut text_accum, &mut events, &ThinkingState::InThinking);
                         self.buffer.clear();
                         self.active_pair = None;
                         self.state = ThinkingState::Normal;
                         events.push(ThinkingEvent::ThinkingEnd);
-                    } else if !is_prefix_of_close_tag(&self.buffer, pair_idx) {
+                    } else if !self.is_prefix_of_close_tag(&self.buffer, pair_idx) {
                         // Not a valid close tag prefix — emit buffer as thinking content
                         text_accum.push_str(&self.buffer);
                         self.buffer.clear();
@@ -487,5 +514,25 @@ mod tests {
             prop_assert_eq!(ref_thinking, chunked_thinking);
             prop_assert_eq!(ref_text, chunked_text);
         }
+    }
+
+    #[test]
+    fn test_thought_tag_detection() {
+        let mut p = ThinkingParser::new();
+        let events = p.feed("<thought>my thought</thought>rest");
+        let mut events_all = events;
+        events_all.extend(p.flush());
+
+        let thinking: String = events_all.iter().filter_map(|e| match e {
+            ThinkingEvent::ThinkingDelta(t) => Some(t.as_str()),
+            _ => None,
+        }).collect();
+        let text: String = events_all.iter().filter_map(|e| match e {
+            ThinkingEvent::Text(t) => Some(t.as_str()),
+            _ => None,
+        }).collect();
+
+        assert_eq!(thinking, "my thought");
+        assert_eq!(text, "rest");
     }
 }

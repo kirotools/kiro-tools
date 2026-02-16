@@ -108,6 +108,7 @@ pub struct AppState {
     pub port: u16,                     // [NEW] 本地监听端口 (v4.0.8 修复)
     pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [FIX Web Mode]
     pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [FIX Web Mode]
+    pub fake_reasoning: Arc<tokio::sync::RwLock<crate::proxy::config::FakeReasoningConfig>>, // [NEW] Fake reasoning 配置 (热更新)
 }
 
 // 为 AppState 实现 FromRef，以便中间件提取 security 状态
@@ -236,6 +237,7 @@ pub struct AxumServer {
     pub model_cache: Arc<crate::proxy::upstream::model_cache::ModelCache>,
     pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>,
     pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>,
+    pub fake_reasoning: Arc<tokio::sync::RwLock<crate::proxy::config::FakeReasoningConfig>>,
 }
 
 #[allow(dead_code)]
@@ -289,11 +291,13 @@ impl AxumServer {
         integration: crate::modules::integration::SystemManager,
         cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
         proxy_pool_config: crate::proxy::config::ProxyPoolConfig, // [NEW]
+        fake_reasoning_config: crate::proxy::config::FakeReasoningConfig, // [NEW] Fake reasoning 配置
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
         let custom_mapping_state = Arc::new(tokio::sync::RwLock::new(custom_mapping));
         let proxy_state = Arc::new(tokio::sync::RwLock::new(upstream_proxy.clone()));
         let proxy_pool_state = Arc::new(tokio::sync::RwLock::new(proxy_pool_config));
         let proxy_pool_manager = crate::proxy::proxy_pool::init_global_proxy_pool(proxy_pool_state.clone());
+        let fake_reasoning_state = Arc::new(tokio::sync::RwLock::new(fake_reasoning_config));
     
     // Start health check loop
     proxy_pool_manager.clone().start_health_check_loop();
@@ -324,6 +328,7 @@ impl AxumServer {
             port,
             proxy_pool_state: proxy_pool_state.clone(),
             proxy_pool_manager: proxy_pool_manager.clone(),
+            fake_reasoning: fake_reasoning_state.clone(),
         };
 
         // 构建路由 - 使用新架构的 handlers！
@@ -558,6 +563,7 @@ impl AxumServer {
             model_cache,
             proxy_pool_state,
             proxy_pool_manager,
+            fake_reasoning: fake_reasoning_state,
         };
 
         // 在新任务中启动服务器
@@ -961,6 +967,12 @@ async fn admin_save_config(
     {
         let mut pool = state.proxy_pool_state.write().await;
         *pool = new_config.clone().proxy.proxy_pool;
+    }
+
+    // 热更新 fake reasoning 配置
+    {
+        let mut fr = state.fake_reasoning.write().await;
+        *fr = new_config.clone().proxy.fake_reasoning;
     }
 
     state.token_manager.set_max_concurrency(new_config.proxy.max_concurrency_per_account);

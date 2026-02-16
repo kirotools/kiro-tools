@@ -750,11 +750,15 @@ providing your final response.".to_string()
 }
 
 /// Convert Anthropic ClaudeRequest to Kiro generateAssistantResponse payload
-fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -> Value {
+fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>, fake_reasoning: &crate::proxy::config::FakeReasoningConfig) -> Value {
     let model_id = normalize_model_name(&request.model);
 
     // 1. Extract system prompt and add thinking system prompt addition
-    let thinking_system_addition = get_thinking_system_prompt_addition();
+    let thinking_system_addition = if fake_reasoning.enabled {
+        get_thinking_system_prompt_addition()
+    } else {
+        String::new()
+    };
 
     // 1b. Process long tool descriptions → move to system prompt
     let (desc_overrides, long_desc_system_addition) = if let Some(tools) = &request.tools {
@@ -894,15 +898,17 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
         }
     }
 
-    // 9. Build currentMessage - always inject thinking tags (matching gateway FAKE_REASONING_ENABLED=true)
+    // 9. Build currentMessage - inject thinking tags only when fake reasoning is enabled
     let (_, current_text, _current_tool_uses, current_tool_results, current_images) = last;
-    let max_thinking_tokens = request.thinking.as_ref()
-        .and_then(|t| t.budget_tokens)
-        .unwrap_or(4000);
     let current_content = if current_text.is_empty() {
         "Continue".to_string()
-    } else {
+    } else if fake_reasoning.enabled {
+        let max_thinking_tokens = request.thinking.as_ref()
+            .and_then(|t| t.budget_tokens)
+            .unwrap_or(fake_reasoning.max_tokens);
         inject_thinking_tags(&current_text, max_thinking_tokens)
+    } else {
+        current_text.clone()
     };
 
     let mut user_input_message = json!({
@@ -1789,10 +1795,17 @@ struct AnthropicSseBuilder {
     thinking_parser: ThinkingParser,
     accumulated_text: String,
     thinking_block_index: Option<usize>,
+    /// When true, thinking events are silently dropped (not emitted as SSE blocks)
+    strip_thinking: bool,
 }
 
 impl AnthropicSseBuilder {
-    fn new(model: &str, estimated_input_tokens: u32) -> Self {
+    fn new(model: &str, estimated_input_tokens: u32, strip_thinking: bool, open_tags: &[String]) -> Self {
+        let thinking_parser = if open_tags.is_empty() {
+            ThinkingParser::new()
+        } else {
+            ThinkingParser::with_tags(open_tags)
+        };
         Self {
             message_id: format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..24].to_string()),
             model: model.to_string(),
@@ -1806,9 +1819,10 @@ impl AnthropicSseBuilder {
             current_tool: None,
             completed_tools: Vec::new(),
             has_tool_calls: false,
-            thinking_parser: ThinkingParser::new(),
+            thinking_parser,
             accumulated_text: String::new(),
             thinking_block_index: None,
+            strip_thinking,
         }
     }
 
@@ -1928,6 +1942,10 @@ impl AnthropicSseBuilder {
                 for tp_event in events {
                     match tp_event {
                         ThinkingEvent::ThinkingStart => {
+                            if self.strip_thinking {
+                                // Strip mode: silently drop thinking blocks
+                                continue;
+                            }
                             out.push_str(&self.close_text_block());
                             let sig = format!("sig_{}", uuid::Uuid::new_v4().simple());
                             out.push_str(&Self::format_sse(
@@ -1946,6 +1964,9 @@ impl AnthropicSseBuilder {
                             self.content_index += 1;
                         }
                         ThinkingEvent::ThinkingDelta(thinking_text) => {
+                            if self.strip_thinking {
+                                continue;
+                            }
                             if let Some(idx) = self.thinking_block_index {
                                 out.push_str(&Self::format_sse(
                                     "content_block_delta",
@@ -1961,6 +1982,9 @@ impl AnthropicSseBuilder {
                             }
                         }
                         ThinkingEvent::ThinkingEnd => {
+                            if self.strip_thinking {
+                                continue;
+                            }
                             if let Some(idx) = self.thinking_block_index {
                                 out.push_str(&Self::format_sse(
                                     "content_block_stop",
@@ -2194,6 +2218,7 @@ pub async fn handle_kiro_messages(
     token_manager: &crate::proxy::token_manager::TokenManager,
     original_model: Option<&str>,
     request_timeout_secs: u64,
+    fake_reasoning: &crate::proxy::config::FakeReasoningConfig,
 ) -> Response {
     if has_unsupported_server_tools(request) {
         return error_response(
@@ -2224,7 +2249,11 @@ pub async fn handle_kiro_messages(
     );
 
     // 1. Convert Anthropic request to Kiro payload
-    let kiro_payload = convert_to_kiro_payload(request, profile_arn);
+    let kiro_payload = convert_to_kiro_payload(request, profile_arn, fake_reasoning);
+
+    // Determine whether to strip thinking blocks from SSE output
+    let strip_thinking = !fake_reasoning.enabled || fake_reasoning.handling == "strip";
+    let open_tags = fake_reasoning.open_tags.clone();
 
     debug!(
         "[{}] [Kiro] Payload: {}",
@@ -2495,7 +2524,7 @@ pub async fn handle_kiro_messages(
         let sse_stream = async_stream::stream! {
             let _slot_guard = concurrency_slot;
 
-            let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
+            let mut builder = AnthropicSseBuilder::new(&model, estimated_input, strip_thinking, &open_tags);
             let mut buffer = BytesMut::new();
             let mut chunk_count: usize = 0;
             let mut total_bytes: usize = 0;
@@ -2638,7 +2667,7 @@ pub async fn handle_kiro_messages(
         };
 
         let (events, _consumed) = parse_events_from_buffer(&body_bytes);
-        let mut builder = AnthropicSseBuilder::new(&model, estimated_input);
+        let mut builder = AnthropicSseBuilder::new(&model, estimated_input, strip_thinking, &open_tags);
 
         let mut text_parts = Vec::new();
         let mut content_blocks: Vec<Value> = Vec::new();
@@ -2709,7 +2738,7 @@ mod tests {
     // Property 3: SSE Thinking block output format
     #[test]
     fn prop_sse_thinking_block_format() {
-        let mut builder = AnthropicSseBuilder::new("test-model", 100);
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
         let out = builder.process_event(KiroEvent::TextDelta(
             "<thinking>test content</thinking>normal text".to_string(),
         ));
@@ -2861,7 +2890,7 @@ mod tests {
     // Property 21: Incomplete stream truncation detection
     #[test]
     fn prop_incomplete_stream_truncation() {
-        let mut builder = AnthropicSseBuilder::new("test-model", 100);
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
         let _ = builder.process_event(KiroEvent::ToolUseStart {
             name: "test_tool".to_string(),
             tool_use_id: "tool_123".to_string(),
@@ -3393,5 +3422,294 @@ mod tests {
         assert!(user_input.get("userInputMessageContext").is_none());
         let content = user_input.get("content").and_then(|v| v.as_str()).unwrap();
         assert!(content.contains("only orphan"));
+    }
+
+    // ===== Fake Reasoning config-driven tests =====
+
+    #[test]
+    fn test_sse_strip_mode_no_thinking_leak() {
+        // strip_thinking = true → thinking blocks MUST NOT appear in output
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, true, &[]);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thinking>secret reasoning</thinking>visible text".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        // Must not contain any thinking-related SSE events
+        assert!(!combined.contains("thinking_delta"), "thinking_delta leaked in strip mode");
+        assert!(!combined.contains("\"type\": \"thinking\""), "thinking block leaked in strip mode");
+        assert!(!combined.contains("secret reasoning"), "thinking content leaked in strip mode");
+        // But visible text should still be present
+        assert!(combined.contains("visible text"), "visible text missing in strip mode");
+    }
+
+    #[test]
+    fn test_sse_inject_mode_emits_thinking() {
+        // strip_thinking = false → thinking blocks MUST appear in output
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thinking>my reasoning</thinking>answer".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        // Must contain thinking block
+        assert!(combined.contains("thinking_delta"), "thinking_delta missing in inject mode");
+        assert!(combined.contains("my reasoning"), "thinking content missing in inject mode");
+        // And visible text
+        assert!(combined.contains("answer"), "answer text missing in inject mode");
+    }
+
+    #[test]
+    fn test_convert_payload_enabled() {
+        use crate::proxy::config::FakeReasoningConfig;
+        let config = FakeReasoningConfig {
+            enabled: true,
+            handling: "inject".to_string(),
+            max_tokens: 8000,
+            open_tags: vec![],
+        };
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("hello".to_string()),
+            }],
+            stream: true,
+            max_tokens: Some(4096),
+            system: None,
+            tools: None,
+            metadata: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            thinking: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+        let payload = convert_to_kiro_payload(&request, None, &config);
+        let content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(content.contains("<thinking_mode>enabled</thinking_mode>"),
+            "thinking_mode tag missing when enabled");
+        assert!(content.contains("<max_thinking_length>8000</max_thinking_length>"),
+            "max_thinking_length should use config fallback");
+    }
+
+    #[test]
+    fn test_convert_payload_disabled() {
+        use crate::proxy::config::FakeReasoningConfig;
+        let config = FakeReasoningConfig {
+            enabled: false,
+            handling: "inject".to_string(),
+            max_tokens: 8000,
+            open_tags: vec![],
+        };
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("hello".to_string()),
+            }],
+            stream: true,
+            max_tokens: Some(4096),
+            system: None,
+            tools: None,
+            metadata: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            thinking: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+        let payload = convert_to_kiro_payload(&request, None, &config);
+        let content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(!content.contains("<thinking_mode>"),
+            "thinking_mode tag should NOT appear when disabled");
+        assert!(content.contains("hello"),
+            "user text must be present when disabled");
+        assert!(!content.contains("<max_thinking_length>"),
+            "max_thinking_length tag should NOT appear when disabled");
+    }
+
+    // ==================== Task 5: Golden Boundary Tests ====================
+
+    /// Tag split across chunk boundary in inject mode → thinking blocks still emitted
+    #[test]
+    fn test_sse_inject_mode_chunk_split_tag() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
+        // Split the opening tag across two chunks
+        let out1 = builder.process_event(KiroEvent::TextDelta("<think".to_string()));
+        let out2 = builder.process_event(KiroEvent::TextDelta("ing>deep thought</thinking>answer".to_string()));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}{}", out1, out2, final_out);
+
+        assert!(combined.contains("deep thought"), "thinking content missing after split-tag inject");
+        assert!(combined.contains("thinking_delta"), "thinking_delta missing after split-tag inject");
+        assert!(combined.contains("answer"), "regular answer missing after split-tag inject");
+    }
+
+    /// Tag split across chunk boundary in strip mode → ZERO thinking leaks
+    #[test]
+    fn test_sse_strip_mode_chunk_split_tag_no_leak() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, true, &[]);
+        // Split the closing tag across two chunks
+        let out1 = builder.process_event(KiroEvent::TextDelta("<thinking>secret</think".to_string()));
+        let out2 = builder.process_event(KiroEvent::TextDelta("ing>visible".to_string()));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}{}", out1, out2, final_out);
+
+        assert!(!combined.contains("secret"), "thinking content 'secret' leaked in strip mode");
+        assert!(!combined.contains("thinking_delta"), "thinking_delta leaked in strip mode with split tag");
+        assert!(combined.contains("visible"), "visible text missing after strip-mode split tag");
+    }
+
+    /// Multiple thinking blocks in one stream (inject mode) → both emitted
+    #[test]
+    fn test_sse_inject_mode_multiple_thinking_blocks() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thinking>thought1</thinking>mid<thinking>thought2</thinking>final".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        assert!(combined.contains("thought1"), "first thinking block missing");
+        assert!(combined.contains("mid"), "middle text missing");
+        // The second <thinking> after STREAMING state should be treated as text
+        // (parser only detects first thinking block at start)
+        assert!(combined.contains("final"), "final text missing");
+    }
+
+    /// Unclosed thinking tag at end-of-stream in strip mode → no leak on flush
+    #[test]
+    fn test_sse_strip_mode_unclosed_tag_flush() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, true, &[]);
+        // Feed opening tag but never close it — stream ends
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thinking>unclosed reasoning that keeps going...".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        assert!(!combined.contains("unclosed reasoning"), "unclosed thinking content leaked in strip mode");
+        assert!(!combined.contains("thinking_delta"), "thinking_delta should not appear for unclosed tags in strip mode");
+    }
+
+    /// <thought> tag through SSE builder (inject mode) → thinking blocks emitted
+    #[test]
+    fn test_sse_inject_mode_thought_tag() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, false, &[]);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thought>my thought content</thought>result".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        assert!(combined.contains("my thought content"), "thought tag content missing in inject mode");
+        assert!(combined.contains("thinking_delta"), "thinking_delta missing for <thought> tag");
+        assert!(combined.contains("result"), "result text missing after <thought> tag");
+    }
+
+    /// <thought> tag through SSE builder (strip mode) → no leak
+    #[test]
+    fn test_sse_strip_mode_thought_tag_no_leak() {
+        let mut builder = AnthropicSseBuilder::new("test-model", 100, true, &[]);
+        let out = builder.process_event(KiroEvent::TextDelta(
+            "<thought>secret thought</thought>visible result".to_string(),
+        ));
+        let final_out = builder.finalize();
+        let combined = format!("{}{}", out, final_out);
+
+        assert!(!combined.contains("secret thought"), "thought content leaked in strip mode");
+        assert!(!combined.contains("thinking_delta"), "thinking_delta leaked for <thought> in strip mode");
+        assert!(combined.contains("visible result"), "visible result missing after <thought> strip");
+    }
+
+    /// System prompt addition is absent when fake_reasoning is disabled
+    #[test]
+    fn test_convert_payload_disabled_no_system_addition() {
+        use crate::proxy::config::FakeReasoningConfig;
+        let config = FakeReasoningConfig {
+            enabled: false,
+            handling: "inject".to_string(),
+            max_tokens: 8000,
+            open_tags: vec![],
+        };
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("hello".to_string()),
+            }],
+            stream: true,
+            max_tokens: Some(4096),
+            system: Some(SystemPrompt::String("You are helpful.".to_string())),
+            tools: None,
+            metadata: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            thinking: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+        let payload = convert_to_kiro_payload(&request, None, &config);
+        // System prompt is prepended to the user message content in Kiro payload
+        let content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(!content.contains("Extended Thinking Mode"),
+            "system prompt should NOT contain thinking addition when disabled");
+        assert!(content.contains("You are helpful."),
+            "original system prompt must be preserved when disabled");
+    }
+
+    /// System prompt addition IS present when fake_reasoning is enabled
+    #[test]
+    fn test_convert_payload_enabled_has_system_addition() {
+        use crate::proxy::config::FakeReasoningConfig;
+        let config = FakeReasoningConfig {
+            enabled: true,
+            handling: "inject".to_string(),
+            max_tokens: 8000,
+            open_tags: vec![],
+        };
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("hello".to_string()),
+            }],
+            stream: true,
+            max_tokens: Some(4096),
+            system: Some(SystemPrompt::String("You are helpful.".to_string())),
+            tools: None,
+            metadata: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            thinking: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+        let payload = convert_to_kiro_payload(&request, None, &config);
+        // System prompt is prepended to the user message content in Kiro payload
+        let content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(content.contains("Extended Thinking Mode"),
+            "system prompt should contain thinking addition when enabled");
+        assert!(content.contains("You are helpful."),
+            "original system prompt must be preserved when enabled");
     }
 }

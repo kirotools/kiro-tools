@@ -219,6 +219,7 @@ pub async fn handle_messages(
         );
 
         let request_timeout_secs = state.request_timeout.load(std::sync::atomic::Ordering::Relaxed);
+        let fake_reasoning_config = state.fake_reasoning.read().await.clone();
         return super::kiro_upstream::handle_kiro_messages(
             &request,
             &access_token,
@@ -231,6 +232,7 @@ pub async fn handle_messages(
             &token_manager,
             mapped_model.as_ref().map(|_| original_model.as_str()),
             request_timeout_secs,
+            &fake_reasoning_config,
         )
         .await;
     }
