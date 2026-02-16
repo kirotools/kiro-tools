@@ -864,7 +864,31 @@ fn load_account_at_path(account_path: &PathBuf) -> Result<Account, String> {
         .map_err(|e| format!("failed_to_parse_account_data: {}", e))?;
     
     if account.encrypted {
-        account.decrypt_tokens()?;
+        match account.decrypt_tokens() {
+            Ok(()) => {}
+            Err(e) => {
+                // [FIX] Graceful recovery: if encrypted=true but decryption fails, the file
+                // likely contains plaintext tokens (caused by save_refreshed_token bug).
+                // Reset the flag and re-save with proper encryption instead of losing the account.
+                crate::modules::logger::log_warn(&format!(
+                    "Decryption failed for account {} ({}), attempting plaintext recovery: {}",
+                    account.id, account.email, e
+                ));
+                account.encrypted = false;
+                // Re-save with proper encryption so subsequent loads work correctly
+                if let Err(save_err) = crate::modules::account::save_account(&account) {
+                    crate::modules::logger::log_error(&format!(
+                        "Failed to re-save recovered account {}: {}",
+                        account.id, save_err
+                    ));
+                } else {
+                    crate::modules::logger::log_info(&format!(
+                        "Successfully recovered and re-encrypted account: {} ({})",
+                        account.id, account.email
+                    ));
+                }
+            }
+        }
     }
     
     Ok(account)
@@ -1203,6 +1227,7 @@ pub fn upsert_account_with_source(
                 let old_access_token = account.token.access_token.clone();
                 let old_refresh_token = account.token.refresh_token.clone();
                 account.token = token;
+                account.encrypted = false; // Reset flag when assigning new plaintext token
                 account.name = name.clone();
                 
                 if let Some(path) = creds_file {
@@ -1416,6 +1441,7 @@ pub async fn switch_account(
     // If Token updated, save back to account file
     if fresh_token.access_token != account.token.access_token {
         account.token = fresh_token.clone();
+        account.encrypted = false; // Reset flag when assigning new plaintext token
         save_account(&account)?;
     }
 
@@ -1578,6 +1604,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
     if token.access_token != account.token.access_token {
         modules::logger::log_info(&format!("Time-based Token refresh: {}", account.email));
         account.token = token.clone();
+        account.encrypted = false; // Reset flag when assigning new plaintext token
 
         // Get display name (incidental to Token refresh)
         let name = if account.name.is_none()
@@ -1708,6 +1735,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
                 };
 
                 account.token = new_token.clone();
+                account.encrypted = false; // Reset flag when assigning new plaintext token
                 account.name = name.clone();
                 upsert_account(account.email.clone(), name, new_token.clone())
                     .map_err(AppError::Account)?;

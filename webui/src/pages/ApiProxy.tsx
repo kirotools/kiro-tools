@@ -983,8 +983,7 @@ export default function ApiProxy() {
                                         }}
                                         min={30}
                                         max={7200}
-                                        disabled={status.running}
-                                        className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-base-200 rounded-lg bg-white dark:bg-base-200 text-xs text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+                                        className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-base-200 rounded-lg bg-white dark:bg-base-200 text-xs text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                     />
                                     <p className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
                                         {t('proxy.config.request_timeout_hint')}

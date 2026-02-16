@@ -1545,6 +1545,7 @@ pub async fn handle_kiro_messages(
     concurrency_slot: ConcurrencySlot,
     token_manager: &crate::proxy::token_manager::TokenManager,
     original_model: Option<&str>,
+    request_timeout_secs: u64,
 ) -> Response {
     if has_unsupported_server_tools(request) {
         return error_response(
@@ -1576,7 +1577,11 @@ pub async fn handle_kiro_messages(
     const MAX_RETRIES: usize = 3;
     const BASE_DELAY_MS: u64 = 1000;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut current_token = access_token.to_string();
 
     let resp = 'retry: {
@@ -1709,6 +1714,12 @@ pub async fn handle_kiro_messages(
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                     continue;
                 }
+                error!(
+                    "[{}] [Kiro] 429 Rate Limited - Payload: {} | Response: {}",
+                    trace_id,
+                    serde_json::to_string(&kiro_payload).unwrap_or_default(),
+                    error_text
+                );
                 return error_response(
                     StatusCode::TOO_MANY_REQUESTS,
                     AnthropicErrorType::RateLimitError,
@@ -1726,6 +1737,13 @@ pub async fn handle_kiro_messages(
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                     continue;
                 }
+                error!(
+                    "[{}] [Kiro] {} Server Error - Payload: {} | Response: {}",
+                    trace_id,
+                    status.as_u16(),
+                    serde_json::to_string(&kiro_payload).unwrap_or_default(),
+                    error_text
+                );
                 return error_response(
                     StatusCode::BAD_GATEWAY,
                     AnthropicErrorType::ApiError,
@@ -1735,7 +1753,24 @@ pub async fn handle_kiro_messages(
 
             // Other errors — attempt to parse Kiro error body and map to user-friendly message
             let error_text = response.text().await.unwrap_or_default();
-            error!("[{}] [Kiro] Upstream error {}: {}", trace_id, status.as_u16(), error_text);
+
+            // Log payload for 400 and other errors
+            if status.as_u16() == 400 {
+                error!(
+                    "[{}] [Kiro] 400 Bad Request - Payload: {} | Response: {}",
+                    trace_id,
+                    serde_json::to_string(&kiro_payload).unwrap_or_default(),
+                    error_text
+                );
+            } else {
+                error!(
+                    "[{}] [Kiro] {} Error - Payload: {} | Response: {}",
+                    trace_id,
+                    status.as_u16(),
+                    serde_json::to_string(&kiro_payload).unwrap_or_default(),
+                    error_text
+                );
+            }
 
             // Try to extract reason code from Kiro error JSON
             let error_info = if let Ok(err_json) = serde_json::from_str::<Value>(&error_text) {

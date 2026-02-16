@@ -208,6 +208,7 @@ pub async fn handle_messages(
             trace_id, email, region
         );
 
+        let request_timeout_secs = state.request_timeout.load(std::sync::atomic::Ordering::Relaxed);
         return super::kiro_upstream::handle_kiro_messages(
             &request,
             &access_token,
@@ -219,6 +220,7 @@ pub async fn handle_messages(
             _concurrency_slot,
             &token_manager,
             mapped_model.as_ref().map(|_| original_model.as_str()),
+            request_timeout_secs,
         )
         .await;
     }

@@ -176,7 +176,31 @@ impl TokenManager {
         let mut account: crate::models::Account = serde_json::from_str(&content)
             .map_err(|e| format!("failed_to_parse_account_data: {}", e))?;
         if account.encrypted {
-            account.decrypt_tokens()?;
+            match account.decrypt_tokens() {
+                Ok(()) => {}
+                Err(e) => {
+                    // [FIX] Graceful recovery: if encrypted=true but decryption fails,
+                    // treat tokens as plaintext (caused by save_refreshed_token writing
+                    // plaintext while encrypted flag remained true).
+                    tracing::warn!(
+                        "Decryption failed for account {} ({}), attempting plaintext recovery: {}",
+                        account.id, account.email, e
+                    );
+                    account.encrypted = false;
+                    // Re-save with proper encryption
+                    if let Err(save_err) = Self::save_account_to_path(path, &account) {
+                        tracing::error!(
+                            "Failed to re-save recovered account {}: {}",
+                            account.id, save_err
+                        );
+                    } else {
+                        tracing::info!(
+                            "Successfully recovered and re-encrypted account: {} ({})",
+                            account.id, account.email
+                        );
+                    }
+                }
+            }
         }
         Ok(account)
     }
@@ -1531,14 +1555,24 @@ impl TokenManager {
 
         let now = chrono::Utc::now().timestamp();
 
-        content["token"]["access_token"] = serde_json::Value::String(token_response.access_token.clone());
+        // [FIX] Encrypt new token values before writing to disk.
+        // Previously, plaintext tokens were written while `encrypted` remained `true`,
+        // causing decrypt_tokens() to fail on next load → account silently skipped.
+        let encrypted_access = crate::utils::crypto::encrypt_string(&token_response.access_token)
+            .map_err(|e| format!("加密 access_token 失败: {}", e))?;
+        content["token"]["access_token"] = serde_json::Value::String(encrypted_access);
         content["token"]["expires_in"] = serde_json::Value::Number(token_response.expires_in.into());
         content["token"]["expiry_timestamp"] = serde_json::Value::Number((now + token_response.expires_in).into());
 
         // Save new refresh_token if returned (token rotation)
         if let Some(ref new_rt) = token_response.refresh_token {
-            content["token"]["refresh_token"] = serde_json::Value::String(new_rt.clone());
+            let encrypted_refresh = crate::utils::crypto::encrypt_string(new_rt)
+                .map_err(|e| format!("加密 refresh_token 失败: {}", e))?;
+            content["token"]["refresh_token"] = serde_json::Value::String(encrypted_refresh);
         }
+
+        // Ensure encrypted flag is true (tokens are now encrypted)
+        content["encrypted"] = serde_json::Value::Bool(true);
 
         std::fs::write(path, serde_json::to_string_pretty(&content).unwrap())
             .map_err(|e| format!("写入文件失败: {}", e))?;

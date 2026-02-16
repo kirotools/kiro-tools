@@ -93,8 +93,7 @@ pub struct AppState {
     pub token_manager: Arc<TokenManager>,
     pub custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
     pub model_cache: Arc<crate::proxy::upstream::model_cache::ModelCache>,
-    #[allow(dead_code)]
-    pub request_timeout: u64, // API 请求超时(秒)
+    pub request_timeout: Arc<std::sync::atomic::AtomicU64>, // API 请求超时(秒), runtime-updatable
     #[allow(dead_code)]
     pub thought_signature_map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>, // 思维链签名映射 (ID -> Signature)
     #[allow(dead_code)]
@@ -308,7 +307,7 @@ impl AxumServer {
             token_manager: token_manager.clone(),
             custom_mapping: custom_mapping_state.clone(),
             model_cache: model_cache.clone(),
-            request_timeout: 300, // 5分钟超时
+            request_timeout: Arc::new(std::sync::atomic::AtomicU64::new(_request_timeout)),
             thought_signature_map: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -965,6 +964,12 @@ async fn admin_save_config(
     }
 
     state.token_manager.set_max_concurrency(new_config.proxy.max_concurrency_per_account);
+
+    // 热更新请求超时
+    state.request_timeout.store(
+        new_config.proxy.request_timeout,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     Ok(StatusCode::OK)
 }

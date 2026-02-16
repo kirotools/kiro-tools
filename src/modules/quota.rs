@@ -250,6 +250,7 @@ pub async fn get_valid_token_for_account(account: &crate::models::account::Accou
 
     if new_token.access_token != account.token.access_token {
         account.token = new_token;
+        account.encrypted = false; // Reset flag when assigning new plaintext token
         if let Err(e) = crate::modules::account::save_account(&account) {
             crate::modules::logger::log_warn(&format!("Failed to save refreshed token: {}", e));
         } else {
