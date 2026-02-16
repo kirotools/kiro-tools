@@ -3071,8 +3071,6 @@ mod tests {
     /// 测试高端模型排序：Power 账号优先于 Pro 账号（即使 Pro 配额更高）
     #[test]
     fn test_power_priority_for_high_end_models() {
-        const RESET_TIME_THRESHOLD_SECS: i64 = 600;
-
         // 模拟高端模型排序逻辑
         fn compare_tokens_for_model(a: &ProxyToken, b: &ProxyToken, target_model: &str) -> Ordering {
             const HIGH_END_MODELS: &[&str] = &["claude-opus-4-6", "claude-opus-4-5", "opus"];
@@ -3359,13 +3357,12 @@ mod tests {
             .await;
         assert!(result.is_none(), "Should timeout when slot is full");
 
-        let manager2 = manager.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             drop(_slot);
         });
 
-        let result2 = manager2
+        let result2 = manager
             .acquire_slot_with_timeout("acc1", std::time::Duration::from_secs(2))
             .await;
         assert!(result2.is_some(), "Should succeed after slot released");
@@ -3422,7 +3419,6 @@ mod tests {
         // Hold the lock
         let guard = lock.lock().await;
 
-        let manager2 = manager.clone();
         let lock2 = lock.clone();
 
         // Spawn a task that tries to acquire the same lock
@@ -3676,7 +3672,7 @@ mod tests {
         let mut handles = Vec::new();
 
         // Spawn 5 concurrent "refresh" attempts
-        for i in 0..5 {
+        for _i in 0..5 {
             let mgr = manager.clone();
             let count = refresh_count.clone();
 
