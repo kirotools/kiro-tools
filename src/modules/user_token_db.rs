@@ -179,6 +179,36 @@ pub fn init_db() -> Result<(), String> {
         [],
     );
 
+    normalize_existing_usage_log_models(&conn)?;
+
+    Ok(())
+}
+
+fn normalize_existing_usage_log_models(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT model FROM token_usage_logs WHERE model IS NOT NULL AND model <> ''")
+        .map_err(|e| format!("Failed to query usage log models: {}", e))?;
+
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to map usage log models: {}", e))?;
+
+    let mut models = Vec::new();
+    for row in rows {
+        models.push(row.map_err(|e| format!("Failed to read usage log model: {}", e))?);
+    }
+
+    for original_model in models {
+        let normalized_model = crate::modules::token_stats::normalize_model_for_stats(&original_model);
+        if normalized_model != original_model {
+            conn.execute(
+                "UPDATE token_usage_logs SET model = ?1 WHERE model = ?2",
+                params![normalized_model, original_model],
+            )
+            .map_err(|e| format!("Failed to normalize usage log model: {}", e))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -521,6 +551,7 @@ pub fn record_token_usage_and_ip(
         .transaction()
         .map_err(|e| format!("Failed to create transaction: {}", e))?;
     let now = Utc::now().timestamp();
+    let normalized_model = crate::modules::token_stats::normalize_model_for_stats(model);
 
     // 1. 更新 user_tokens 主表
     tx.execute(
@@ -571,7 +602,7 @@ pub fn record_token_usage_and_ip(
             log_id,
             token_id,
             ip,
-            model,
+            normalized_model,
             input_tokens,
             output_tokens,
             now,

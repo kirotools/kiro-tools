@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use regex::Regex;
 
 /// Aggregated token statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +76,180 @@ fn connect_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
+pub fn normalize_model_for_stats(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+
+    let lower = trimmed.to_lowercase();
+    if !lower.starts_with("claude") {
+        return trimmed.to_string();
+    }
+
+    let re_standard_with_suffix =
+        Regex::new(r"^(claude-(?:haiku|sonnet|opus)-\d+-\d{1,2})-(?:\d{8}|latest|\d+)$")
+            .unwrap();
+    if let Some(caps) = re_standard_with_suffix.captures(&lower) {
+        return caps[1].to_string();
+    }
+
+    let re_no_minor_with_date =
+        Regex::new(r"^(claude-(?:haiku|sonnet|opus)-\d+)-\d{8}$").unwrap();
+    if let Some(caps) = re_no_minor_with_date.captures(&lower) {
+        return caps[1].to_string();
+    }
+
+    let re_legacy_with_suffix =
+        Regex::new(r"^(claude-\d+-\d+-(?:haiku|sonnet|opus))-(?:\d{8}|latest|\d+)$")
+            .unwrap();
+    if let Some(caps) = re_legacy_with_suffix.captures(&lower) {
+        return caps[1].to_string();
+    }
+
+    let re_dot_with_date =
+        Regex::new(r"^(claude-(?:\d+\.\d+-)?(?:haiku|sonnet|opus)(?:-\d+\.\d+)?)-\d{8}$")
+            .unwrap();
+    if let Some(caps) = re_dot_with_date.captures(&lower) {
+        return caps[1].to_string();
+    }
+
+    lower
+}
+
+fn normalize_existing_models(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT model FROM token_usage")
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut distinct_models = Vec::new();
+    for row in rows {
+        distinct_models.push(row.map_err(|e| e.to_string())?);
+    }
+
+    for original in distinct_models {
+        let normalized = normalize_model_for_stats(&original);
+        if normalized != original {
+            conn.execute(
+                "UPDATE token_usage SET model = ?1 WHERE model = ?2",
+                params![normalized, original],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn repair_mapped_models_from_proxy_logs(conn: &Connection) -> Result<usize, String> {
+    let proxy_db_path = match crate::modules::proxy_db::get_proxy_db_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(0),
+    };
+
+    if !proxy_db_path.exists() {
+        return Ok(0);
+    }
+
+    let proxy_conn = match Connection::open(proxy_db_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(0),
+    };
+
+    let mut stmt = match proxy_conn.prepare(
+        "SELECT timestamp, account_email, model, mapped_model,
+                COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+                COALESCE(cache_creation_input_tokens, 0), COALESCE(cache_read_input_tokens, 0)
+         FROM request_logs
+         WHERE account_email IS NOT NULL
+           AND model IS NOT NULL
+           AND mapped_model IS NOT NULL
+           AND mapped_model <> ''
+           AND status >= 200 AND status < 400
+           AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)) > 0
+         ORDER BY timestamp ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(0),
+    };
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u32>(4)?,
+                row.get::<_, u32>(5)?,
+                row.get::<_, u32>(6)?,
+                row.get::<_, u32>(7)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut updated_rows = 0usize;
+
+    for row in rows {
+        let (
+            timestamp_ms,
+            account_email,
+            source_model_raw,
+            mapped_model_raw,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        ) = row.map_err(|e| e.to_string())?;
+
+        let source_model = normalize_model_for_stats(&source_model_raw);
+        let mapped_model = normalize_model_for_stats(&mapped_model_raw);
+
+        if source_model == mapped_model {
+            continue;
+        }
+
+        let timestamp_sec = timestamp_ms / 1000;
+
+        let changed = conn
+            .execute(
+                "UPDATE token_usage
+                 SET model = ?1
+                 WHERE rowid IN (
+                    SELECT rowid FROM token_usage
+                    WHERE account_email = ?2
+                      AND model = ?3
+                      AND timestamp BETWEEN ?4 AND ?5
+                      AND input_tokens = ?6
+                      AND output_tokens = ?7
+                      AND COALESCE(cache_creation_input_tokens, 0) = ?8
+                      AND COALESCE(cache_read_input_tokens, 0) = ?9
+                    LIMIT 1
+                 )",
+                params![
+                    mapped_model,
+                    account_email,
+                    source_model,
+                    timestamp_sec - 2,
+                    timestamp_sec + 2,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_tokens,
+                    cache_read_tokens,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        updated_rows += changed;
+    }
+
+    Ok(updated_rows)
+}
+
 /// Initialize the token stats database
 pub fn init_db() -> Result<(), String> {
     let conn = connect_db()?;
@@ -147,6 +322,9 @@ pub fn init_db() -> Result<(), String> {
         [],
     );
 
+    normalize_existing_models(&conn)?;
+    let _ = repair_mapped_models_from_proxy_logs(&conn)?;
+
     Ok(())
 }
 
@@ -162,11 +340,12 @@ pub fn record_usage(
     let conn = connect_db()?;
     let timestamp = chrono::Utc::now().timestamp();
     let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+    let normalized_model = normalize_model_for_stats(model);
 
     conn.execute(
         "INSERT INTO token_usage (timestamp, account_email, model, input_tokens, output_tokens, total_tokens, cache_creation_input_tokens, cache_read_input_tokens)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![timestamp, account_email, model, input_tokens, output_tokens, total_tokens, cache_creation_tokens, cache_read_tokens],
+        params![timestamp, account_email, normalized_model, input_tokens, output_tokens, total_tokens, cache_creation_tokens, cache_read_tokens],
     ).map_err(|e| e.to_string())?;
 
     let hour_bucket = chrono::Utc::now().format("%Y-%m-%d %H:00").to_string();

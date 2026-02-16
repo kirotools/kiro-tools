@@ -161,7 +161,11 @@ impl ProxyMonitor {
 
             // Record token stats if available
             if let Some(account) = &log_to_save.account_email {
-                let model = log_to_save.model.clone().unwrap_or_else(|| "unknown".to_string());
+                let model = log_to_save
+                    .mapped_model
+                    .clone()
+                    .or(log_to_save.model.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let input = log_to_save.input_tokens.unwrap_or(0);
                 let output = log_to_save.output_tokens.unwrap_or(0);
                 let cache_creation = log_to_save.cache_creation_input_tokens.unwrap_or(0);
@@ -223,7 +227,11 @@ impl ProxyMonitor {
             if input > 0 || output > 0 || cache_creation > 0 || cache_read > 0 {
                 tracing::info!("Recording tokens: account={}, input={}, output={}, cache_creation={}, cache_read={}", 
                     account, input, output, cache_creation, cache_read);
-                let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
+                let model = log
+                    .mapped_model
+                    .clone()
+                    .or(log.model.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let account = account.clone();
                 tokio::spawn(async move {
                     if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output, cache_creation, cache_read) {
