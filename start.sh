@@ -28,6 +28,26 @@ pid_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+# 查找真实运行中的 kiro-tools 进程（兼容 PID 文件失配场景）
+find_running_pid() {
+    # 优先按二进制路径匹配
+    local pid
+    pid=$(pgrep -f "$SCRIPT_DIR/target/release/kiro-tools" | head -n1 || true)
+    if [ -n "$pid" ] && pid_alive "$pid"; then
+        echo "$pid"
+        return 0
+    fi
+
+    # 兜底：按可执行名匹配
+    pid=$(pgrep -f "target/release/kiro-tools" | head -n1 || true)
+    if [ -n "$pid" ] && pid_alive "$pid"; then
+        echo "$pid"
+        return 0
+    fi
+
+    return 1
+}
+
 write_pid() {
     echo "$1" > "$PID_FILE"
 }
@@ -105,12 +125,22 @@ wait_healthy() {
 
 # --- 启动 ---
 do_start() {
-    local pid
+    local pid running_pid
     pid=$(read_pid)
+
+    # PID 文件有效
     if pid_alive "$pid"; then
         _yellow "服务已在运行 (PID: $pid, 端口: $PORT)"
         return 0
     fi
+
+    # PID 文件失效但进程仍在运行：回填 PID 文件
+    if running_pid=$(find_running_pid); then
+        write_pid "$running_pid"
+        _yellow "检测到服务已在运行但 PID 文件失配，已修复 PID: $running_pid"
+        return 0
+    fi
+
     # 清理过期 PID 文件
     clean_pid
 
@@ -138,13 +168,22 @@ do_start() {
 
 # --- 停止 ---
 do_stop() {
-    local pid
+    local pid running_pid
     pid=$(read_pid)
+
+    # PID 文件失效时，尝试发现真实进程
     if ! pid_alive "$pid"; then
-        clean_pid
-        _yellow "服务未运行"
-        return 0
+        if running_pid=$(find_running_pid); then
+            pid="$running_pid"
+            write_pid "$pid"
+            _yellow "检测到 PID 文件失配，改为停止真实进程 PID: $pid"
+        else
+            clean_pid
+            _yellow "服务未运行"
+            return 0
+        fi
     fi
+
     _green ">>> 停止服务 (PID: $pid)..."
     kill "$pid" 2>/dev/null || true
     # 等待进程退出 (最多 5 秒)
@@ -167,10 +206,13 @@ do_stop() {
 
 # --- 状态 ---
 do_status() {
-    local pid
+    local pid running_pid
     pid=$(read_pid)
     if pid_alive "$pid"; then
         _green "运行中 (PID: $pid, 端口: $PORT)"
+    elif running_pid=$(find_running_pid); then
+        write_pid "$running_pid"
+        _yellow "运行中 (PID 文件已修复: $running_pid, 端口: $PORT)"
     else
         clean_pid
         _red "未运行"

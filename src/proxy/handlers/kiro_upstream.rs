@@ -1014,6 +1014,15 @@ fn slim_kiro_payload(payload: &mut Value) {
     if history_removed > 0 {
         actions.push(format!("removed {} history messages", history_removed));
     }
+
+    // Repair orphan toolResults that can appear after history trimming.
+    // If a user toolResult references a toolUseId that no longer exists in
+    // preserved assistant history, Kiro may reject payload as malformed.
+    let orphan_fixed = repair_orphan_tool_results_in_history(payload);
+    if orphan_fixed > 0 {
+        actions.push(format!("repaired {} orphan tool results", orphan_fixed));
+    }
+
     if payload_size(payload) <= MAX_PAYLOAD_CHARS {
         log_slim_result(initial_size, payload_size(payload), &actions);
         return;
@@ -1284,6 +1293,136 @@ fn truncate_large_history_messages(payload: &mut Value, max_chars: usize) -> usi
         }
     }
     count
+}
+
+/// Repair orphan tool results in history after trimming.
+///
+/// When history is trimmed, an assistant message containing `toolUses` can be
+/// removed while a following user message still contains `toolResults` that
+/// reference those removed toolUseIds. Kiro may reject this as malformed.
+///
+/// Strategy:
+/// - Keep toolResults whose toolUseId exists in preserved assistant history.
+/// - Convert orphan toolResults into plain text appended to user content.
+/// - Remove empty toolResults/userInputMessageContext objects.
+///
+/// Returns number of orphan tool results repaired.
+fn repair_orphan_tool_results_in_history(payload: &mut Value) -> usize {
+    use std::collections::HashSet;
+
+    let history = match payload
+        .pointer_mut("/conversationState/history")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(h) => h,
+        None => return 0,
+    };
+
+    let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
+    let mut repaired_count = 0usize;
+
+    for msg in history.iter_mut() {
+        // Track toolUses from assistant messages
+        if let Some(tool_uses) = msg
+            .pointer("/assistantResponseMessage/toolUses")
+            .and_then(|v| v.as_array())
+        {
+            for tool_use in tool_uses {
+                if let Some(id) = tool_use.get("toolUseId").and_then(|v| v.as_str()) {
+                    seen_tool_use_ids.insert(id.to_string());
+                }
+            }
+        }
+
+        // Repair orphan toolResults in user messages
+        let Some(tool_results) = msg
+            .pointer_mut("/userInputMessage/userInputMessageContext/toolResults")
+            .and_then(|v| v.as_array_mut())
+        else {
+            continue;
+        };
+
+        let mut kept: Vec<Value> = Vec::new();
+        let mut orphan_texts: Vec<String> = Vec::new();
+
+        for result in tool_results.iter() {
+            let tool_use_id = result
+                .get("toolUseId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if !tool_use_id.is_empty() && seen_tool_use_ids.contains(tool_use_id) {
+                kept.push(result.clone());
+                continue;
+            }
+
+            repaired_count += 1;
+
+            let content_text = if let Some(content_arr) = result.get("content").and_then(|v| v.as_array()) {
+                content_arr
+                    .iter()
+                    .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if let Some(content_str) = result.get("content").and_then(|v| v.as_str()) {
+                content_str.to_string()
+            } else {
+                result.to_string()
+            };
+
+            orphan_texts.push(format!(
+                "[Recovered orphan tool_result for {}]\n{}",
+                if tool_use_id.is_empty() { "unknown_tool_use_id" } else { tool_use_id },
+                content_text
+            ));
+        }
+
+        *tool_results = kept;
+
+        if !orphan_texts.is_empty() {
+            if let Some(user_input) = msg.get_mut("userInputMessage").and_then(|v| v.as_object_mut()) {
+                let existing_content = user_input
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let appended = orphan_texts.join("\n\n");
+                let new_content = if existing_content.is_empty() || existing_content == "(empty)" {
+                    appended
+                } else {
+                    format!("{}\n\n{}", existing_content, appended)
+                };
+                user_input.insert("content".to_string(), json!(new_content));
+
+                // Remove empty toolResults / userInputMessageContext
+                if let Some(ctx) = user_input
+                    .get_mut("userInputMessageContext")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    if ctx
+                        .get("toolResults")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.is_empty())
+                        .unwrap_or(false)
+                    {
+                        ctx.remove("toolResults");
+                    }
+                    if ctx.is_empty() {
+                        user_input.remove("userInputMessageContext");
+                    }
+                }
+            }
+        }
+    }
+
+    if repaired_count > 0 {
+        warn!(
+            "[Kiro] Repaired {} orphan toolResults in slimmed history",
+            repaired_count
+        );
+    }
+
+    repaired_count
 }
 
 // ===== AWS Event Stream Parser =====
@@ -3173,5 +3312,83 @@ mod tests {
         let specs = build_tool_specifications(&tools, 10000, &overrides);
         let desc = specs[0]["toolSpecification"]["description"].as_str().unwrap();
         assert_eq!(desc, "Short reference");
+    }
+
+    #[test]
+    fn test_repair_orphan_tool_results_in_history() {
+        let mut payload = json!({
+            "conversationState": {
+                "history": [
+                    {
+                        "assistantResponseMessage": {
+                            "content": "tool call",
+                            "toolUses": [
+                                {"toolUseId": "tooluse_keep", "name": "Read", "input": {"path": "a"}}
+                            ]
+                        }
+                    },
+                    {
+                        "userInputMessage": {
+                            "content": "before",
+                            "modelId": "claude-sonnet-4-20250514",
+                            "origin": "AI_EDITOR",
+                            "userInputMessageContext": {
+                                "toolResults": [
+                                    {"toolUseId": "tooluse_keep", "content": [{"text": "ok"}], "status": "success"},
+                                    {"toolUseId": "tooluse_orphan", "content": [{"text": "lost"}], "status": "success"}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let repaired = repair_orphan_tool_results_in_history(&mut payload);
+        assert_eq!(repaired, 1);
+
+        let results = payload["conversationState"]["history"][1]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+            .as_array()
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["toolUseId"], "tooluse_keep");
+
+        let content = payload["conversationState"]["history"][1]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("Recovered orphan tool_result"));
+        assert!(content.contains("tooluse_orphan"));
+    }
+
+    #[test]
+    fn test_repair_orphan_tool_results_removes_empty_context() {
+        let mut payload = json!({
+            "conversationState": {
+                "history": [
+                    {
+                        "userInputMessage": {
+                            "content": "(empty)",
+                            "modelId": "claude-sonnet-4-20250514",
+                            "origin": "AI_EDITOR",
+                            "userInputMessageContext": {
+                                "toolResults": [
+                                    {"toolUseId": "tooluse_missing", "content": [{"text": "only orphan"}], "status": "success"}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let repaired = repair_orphan_tool_results_in_history(&mut payload);
+        assert_eq!(repaired, 1);
+
+        let user_input = payload["conversationState"]["history"][0]["userInputMessage"]
+            .as_object()
+            .unwrap();
+        assert!(user_input.get("userInputMessageContext").is_none());
+        let content = user_input.get("content").and_then(|v| v.as_str()).unwrap();
+        assert!(content.contains("only orphan"));
     }
 }
