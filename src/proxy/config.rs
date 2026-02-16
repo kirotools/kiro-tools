@@ -365,7 +365,7 @@ fn default_fake_reasoning_handling() -> String {
 }
 
 fn default_fake_reasoning_max_tokens() -> u32 {
-    8000
+    4000
 }
 
 fn default_fake_reasoning_open_tags() -> Vec<String> {
@@ -373,6 +373,7 @@ fn default_fake_reasoning_open_tags() -> Vec<String> {
         "<thinking>".to_string(),
         "<think>".to_string(),
         "<reasoning>".to_string(),
+        "<thought>".to_string(),
     ]
 }
 
