@@ -860,14 +860,27 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
 
 /// Slim a Kiro payload by trimming conversation history when it exceeds size limits.
 ///
+/// The function measures the **total serialized payload size** (not just history) because
+/// tool specifications, currentMessage, and other fields can contribute 100+ KB of overhead
+/// that the upstream API counts against its ~128 KB request body limit.
+///
 /// Strategy (sliding window from the front):
 /// 1. If history has more than MAX_HISTORY_MESSAGES entries, drop oldest pairs first
-/// 2. If serialized payload exceeds MAX_PAYLOAD_CHARS, progressively drop oldest
-///    history pairs (user+assistant) until within budget
-/// 3. Always preserve the first user message (contains system prompt) and last few turns
-/// 4. Insert a synthetic summary message at the splice point to notify the model
+/// 2. Calculate non-history overhead (tools, currentMessage, wrapper) dynamically
+/// 3. Trim oldest history entries until total payload fits within MAX_PAYLOAD_CHARS
+/// 4. Always preserve the first 2 messages (system prompt) and last few turns
+/// 5. Insert a synthetic summary message at the splice point to notify the model
 fn slim_kiro_payload(payload: &mut Value) {
-    // Extract history array for manipulation; we'll put it back when done
+    // Step 1: Measure the TOTAL serialized payload size
+    let total_payload_size = serde_json::to_string(&*payload)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Quick exit: if total payload fits within budget, nothing to do
+    // (also check message count below)
+    let needs_size_trim = total_payload_size > MAX_PAYLOAD_CHARS;
+
+    // Step 2: Get mutable access to history
     let history_value = match payload
         .get_mut("conversationState")
         .and_then(|cs| cs.get_mut("history"))
@@ -881,8 +894,25 @@ fn slim_kiro_payload(payload: &mut Value) {
         _ => return,
     };
 
+    let needs_count_trim = history.len() > MAX_HISTORY_MESSAGES;
+
+    if !needs_size_trim && !needs_count_trim {
+        return;
+    }
+
     let original_len = history.len();
-    let mut trimmed = false;
+
+    // Measure history size to calculate non-history overhead dynamically
+    let original_history_size = serde_json::to_string(history as &Vec<Value>)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Non-history overhead = total payload - history (tools, currentMessage, wrapper JSON, etc.)
+    // This is the ACTUAL overhead, not a 2KB guess
+    let non_history_overhead = total_payload_size.saturating_sub(original_history_size);
+
+    // History budget = what's left after accounting for non-history parts
+    let history_budget = MAX_PAYLOAD_CHARS.saturating_sub(non_history_overhead);
 
     // Phase 1: Enforce message count limit
     if history.len() > MAX_HISTORY_MESSAGES {
@@ -891,70 +921,80 @@ fn slim_kiro_payload(payload: &mut Value) {
         let remove_count = history.len().saturating_sub(keep_front + keep_back);
         if remove_count > 0 {
             history.drain(keep_front..keep_front + remove_count);
-            trimmed = true;
         }
     }
 
-    // Phase 2: Enforce payload size limit
-    // Estimate history size by serializing just the history array
-    let mut history_size = serde_json::to_string(history as &Vec<Value>)
-        .map(|s| s.len())
-        .unwrap_or(0);
+    // Phase 2: Enforce payload size limit using the REAL overhead
+    let mut current_history_size = if needs_size_trim {
+        serde_json::to_string(history as &Vec<Value>)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    } else {
+        0 // won't enter the loop
+    };
 
-    // Add overhead estimate for non-history parts (~2KB for currentMessage, tools, etc.)
-    let overhead = 2000;
-
-    if history_size + overhead > MAX_PAYLOAD_CHARS && history.len() > 4 {
-        let keep_front = 2;
-        while history_size + overhead > MAX_PAYLOAD_CHARS && history.len() > 4 {
-            let remove = std::cmp::min(2, history.len() - 4);
-            history.drain(keep_front..keep_front + remove);
-            history_size = serde_json::to_string(history as &Vec<Value>)
-                .map(|s| s.len())
-                .unwrap_or(0);
-        }
-        trimmed = true;
+    let keep_front = 2;
+    while current_history_size > history_budget && history.len() > 4 {
+        let remove = std::cmp::min(2, history.len() - 4);
+        history.drain(keep_front..keep_front + remove);
+        current_history_size = serde_json::to_string(history as &Vec<Value>)
+            .map(|s| s.len())
+            .unwrap_or(0);
     }
 
-    if trimmed {
-        let removed = original_len - history.len();
-        let summary_msg = json!({
-            "assistantResponseMessage": {
-                "content": format!(
-                    "[System: {} earlier messages were omitted to fit context window limits. \
-                     The conversation continues from this point.]",
-                    removed
-                )
-            }
-        });
-        let insert_pos = std::cmp::min(2, history.len());
-        history.insert(insert_pos, summary_msg);
+    let removed = original_len - history.len();
+    if removed == 0 {
+        return;
+    }
 
-        // Ensure alternating roles remain valid after insertion
-        if insert_pos + 1 < history.len() {
-            let next_is_assistant = history[insert_pos + 1].get("assistantResponseMessage").is_some();
-            if next_is_assistant {
-                history.insert(insert_pos + 1, json!({
+    // Insert a synthetic summary message at the splice point
+    let summary_msg = json!({
+        "assistantResponseMessage": {
+            "content": format!(
+                "[System: {} earlier messages were omitted to fit context window limits. \
+                 The conversation continues from this point.]",
+                removed
+            )
+        }
+    });
+    let insert_pos = std::cmp::min(2, history.len());
+    history.insert(insert_pos, summary_msg);
+
+    // Ensure alternating roles remain valid after insertion
+    if insert_pos + 1 < history.len() {
+        let next_is_assistant = history[insert_pos + 1]
+            .get("assistantResponseMessage")
+            .is_some();
+        if next_is_assistant {
+            history.insert(
+                insert_pos + 1,
+                json!({
                     "userInputMessage": {
                         "content": "Continue",
                         "modelId": "claude-sonnet-4-20250514",
                         "origin": "AI_EDITOR"
                     }
-                }));
-            }
+                }),
+            );
         }
-
-        let final_size = serde_json::to_string(history as &Vec<Value>)
-            .map(|s| s.len())
-            .unwrap_or(0);
-        warn!(
-            "[Kiro] Payload slimmed: removed {} of {} history messages (history was ~{} KB, now ~{} KB)",
-            removed,
-            original_len,
-            history_size / 1024,
-            final_size / 1024
-        );
     }
+
+    let final_history_size = serde_json::to_string(history as &Vec<Value>)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let estimated_final_total = final_history_size + non_history_overhead;
+
+    warn!(
+        "[Kiro] Payload slimmed: removed {} of {} history messages \
+         (total: ~{} KB → ~{} KB, history: ~{} KB → ~{} KB, overhead: ~{} KB)",
+        removed,
+        original_len,
+        total_payload_size / 1024,
+        estimated_final_total / 1024,
+        original_history_size / 1024,
+        final_history_size / 1024,
+        non_history_overhead / 1024
+    );
 }
 
 // ===== AWS Event Stream Parser =====
@@ -1220,9 +1260,10 @@ const CLAUDE_CORRECTION_FACTOR: f64 = 1.15;
 
 const TOOL_DESCRIPTION_MAX_LENGTH: usize = 10000;
 
-/// Maximum payload size in characters before history slimming kicks in.
-/// AWS Q generateAssistantResponse has an undocumented request body limit.
-/// Empirically, payloads over ~128KB consistently fail with "Improperly formed request".
+/// Maximum **total** payload size in bytes before history slimming kicks in.
+/// AWS Q generateAssistantResponse has an undocumented request body limit (~128 KB).
+/// We use 120 KB as the threshold, measuring the ENTIRE serialized payload
+/// (history + tools + currentMessage + wrapper), not just the history portion.
 const MAX_PAYLOAD_CHARS: usize = 120_000;
 
 /// Maximum number of history messages to keep when slimming.
