@@ -63,11 +63,25 @@ const formatNumber = (num: number): string => {
     return num.toString();
 };
 
-const shortenModelName = (model: string): string => {
-    return model
-        .replace('claude-', 'c-')
-        .replace('-preview', '')
-        .replace('-latest', '');
+const formatModelDisplayName = (model: string): string => {
+    const normalized = model.replace('-preview', '').replace('-latest', '').toLowerCase();
+
+    const familyMatch = normalized.match(/^claude-(haiku|sonnet|opus)-(\d+)-(\d+)$/);
+    if (familyMatch) {
+        return `Claude ${familyMatch[1][0].toUpperCase()}${familyMatch[1].slice(1)} ${familyMatch[2]}.${familyMatch[3]}`;
+    }
+
+    const majorOnlyMatch = normalized.match(/^claude-(haiku|sonnet|opus)-(\d+)$/);
+    if (majorOnlyMatch) {
+        return `Claude ${majorOnlyMatch[1][0].toUpperCase()}${majorOnlyMatch[1].slice(1)} ${majorOnlyMatch[2]}`;
+    }
+
+    const legacyMatch = normalized.match(/^claude-(\d+)-(\d+)-(haiku|sonnet|opus)$/);
+    if (legacyMatch) {
+        return `Claude ${legacyMatch[3][0].toUpperCase()}${legacyMatch[3].slice(1)} ${legacyMatch[1]}.${legacyMatch[2]}`;
+    }
+
+    return model;
 };
 
 const TokenStats: React.FC = () => {
@@ -249,7 +263,7 @@ const TokenStats: React.FC = () => {
                 <div className="max-h-[180px] overflow-y-auto space-y-1 pr-1.5 scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-700">
                     {sortedPayload.map((entry: any, index: number) => {
                         const name = entry.name;
-                        const displayName = viewMode === 'model' ? shortenModelName(name) : name.split('@')[0];
+                        const displayName = viewMode === 'model' ? formatModelDisplayName(name) : name.split('@')[0];
                         return (
                             <div key={index} className="flex items-center justify-between gap-4">
                                 <div className="flex items-center gap-2 overflow-hidden">
@@ -491,7 +505,7 @@ const TokenStats: React.FC = () => {
                                         wrapperStyle={{ zIndex: 100 }}
                                     />
                                     <Legend
-                                        formatter={(value) => viewMode === 'model' ? shortenModelName(value) : value.split('@')[0]}
+                                        formatter={(value) => viewMode === 'model' ? formatModelDisplayName(value) : value.split('@')[0]}
                                         wrapperStyle={{
                                             fontSize: '11px',
                                             paddingTop: '10px',
@@ -673,7 +687,7 @@ const TokenStats: React.FC = () => {
                                                                 style={{ backgroundColor: MODEL_COLORS[index % MODEL_COLORS.length] }}
                                                             />
                                                             <span className="text-gray-800 dark:text-white font-medium">
-                                                                {model.model}
+                                                                {formatModelDisplayName(model.model)}
                                                             </span>
                                                         </div>
                                                     </td>
