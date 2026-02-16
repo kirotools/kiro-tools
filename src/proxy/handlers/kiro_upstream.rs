@@ -137,7 +137,7 @@ fn extract_tool_uses(content: &MessageContent) -> Vec<Value> {
             if let ContentBlock::ToolUse { id, name, input, .. } = block {
                 tool_uses.push(json!({
                     "toolUseId": id,
-                    "name": name,
+                    "name": sanitize_tool_name(name),
                     "input": input
                 }));
             }
@@ -183,19 +183,73 @@ fn extract_tool_results(content: &MessageContent) -> Vec<Value> {
     results
 }
 
+// ===== JSON Schema & Tool Name Sanitization =====
+// Ported from kiro-gateway converters_core.py:
+// Kiro API returns 400 "Improperly formed request" if:
+// - tool inputSchema contains `additionalProperties`
+// - tool inputSchema has `required: []` (empty array)
+// - tool name contains `$` prefix or exceeds 64 characters
+
+/// Recursively sanitize a JSON Schema by removing fields that Kiro API rejects.
+fn sanitize_json_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            for (key, value) in map {
+                // Skip empty required arrays
+                if key == "required" {
+                    if let Value::Array(arr) = value {
+                        if arr.is_empty() {
+                            continue;
+                        }
+                    }
+                }
+                // Skip additionalProperties — Kiro API doesn't support it
+                if key == "additionalProperties" {
+                    continue;
+                }
+                // Recursively process nested objects and arrays
+                result.insert(key.clone(), sanitize_json_schema(value));
+            }
+            Value::Object(result)
+        }
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(sanitize_json_schema).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Sanitize a tool name for Kiro API compatibility:
+/// - Strip `$` prefix (Anthropic computer-use naming like `$Bash`)
+/// - Truncate to 64 characters (Kiro API limit)
+fn sanitize_tool_name(name: &str) -> String {
+    let cleaned = name.strip_prefix('$').unwrap_or(name);
+    if cleaned.len() > 64 {
+        cleaned[..64].to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
 /// Build tool specifications from Anthropic tools definition
 fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Tool], max_desc_length: usize) -> Vec<Value> {
     tools
         .iter()
         .filter_map(|tool| {
             let name = tool.name.as_deref()?;
+            let name = sanitize_tool_name(name);
             let description = tool.description.as_deref().unwrap_or("");
-            let description = if max_desc_length > 0 && description.len() > max_desc_length {
-                &description[..max_desc_length]
+            // Ensure non-empty description (Kiro API requires it)
+            let description = if description.trim().is_empty() {
+                format!("Tool: {}", name)
+            } else if max_desc_length > 0 && description.len() > max_desc_length {
+                description[..max_desc_length].to_string()
             } else {
-                description
+                description.to_string()
             };
             let schema = tool.input_schema.clone().unwrap_or(json!({}));
+            let schema = sanitize_json_schema(&schema);
             Some(json!({
                 "toolSpecification": {
                     "name": name,
@@ -798,7 +852,109 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
         payload["profileArn"] = json!(arn);
     }
 
+    // Slim payload if it exceeds size limits
+    slim_kiro_payload(&mut payload);
+
     payload
+}
+
+/// Slim a Kiro payload by trimming conversation history when it exceeds size limits.
+///
+/// Strategy (sliding window from the front):
+/// 1. If history has more than MAX_HISTORY_MESSAGES entries, drop oldest pairs first
+/// 2. If serialized payload exceeds MAX_PAYLOAD_CHARS, progressively drop oldest
+///    history pairs (user+assistant) until within budget
+/// 3. Always preserve the first user message (contains system prompt) and last few turns
+/// 4. Insert a synthetic summary message at the splice point to notify the model
+fn slim_kiro_payload(payload: &mut Value) {
+    // Extract history array for manipulation; we'll put it back when done
+    let history_value = match payload
+        .get_mut("conversationState")
+        .and_then(|cs| cs.get_mut("history"))
+    {
+        Some(h) => h,
+        None => return,
+    };
+
+    let history = match history_value.as_array_mut() {
+        Some(h) if h.len() > 2 => h,
+        _ => return,
+    };
+
+    let original_len = history.len();
+    let mut trimmed = false;
+
+    // Phase 1: Enforce message count limit
+    if history.len() > MAX_HISTORY_MESSAGES {
+        let keep_front = 2;
+        let keep_back = MAX_HISTORY_MESSAGES.saturating_sub(4);
+        let remove_count = history.len().saturating_sub(keep_front + keep_back);
+        if remove_count > 0 {
+            history.drain(keep_front..keep_front + remove_count);
+            trimmed = true;
+        }
+    }
+
+    // Phase 2: Enforce payload size limit
+    // Estimate history size by serializing just the history array
+    let mut history_size = serde_json::to_string(history as &Vec<Value>)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Add overhead estimate for non-history parts (~2KB for currentMessage, tools, etc.)
+    let overhead = 2000;
+
+    if history_size + overhead > MAX_PAYLOAD_CHARS && history.len() > 4 {
+        let keep_front = 2;
+        while history_size + overhead > MAX_PAYLOAD_CHARS && history.len() > 4 {
+            let remove = std::cmp::min(2, history.len() - 4);
+            history.drain(keep_front..keep_front + remove);
+            history_size = serde_json::to_string(history as &Vec<Value>)
+                .map(|s| s.len())
+                .unwrap_or(0);
+        }
+        trimmed = true;
+    }
+
+    if trimmed {
+        let removed = original_len - history.len();
+        let summary_msg = json!({
+            "assistantResponseMessage": {
+                "content": format!(
+                    "[System: {} earlier messages were omitted to fit context window limits. \
+                     The conversation continues from this point.]",
+                    removed
+                )
+            }
+        });
+        let insert_pos = std::cmp::min(2, history.len());
+        history.insert(insert_pos, summary_msg);
+
+        // Ensure alternating roles remain valid after insertion
+        if insert_pos + 1 < history.len() {
+            let next_is_assistant = history[insert_pos + 1].get("assistantResponseMessage").is_some();
+            if next_is_assistant {
+                history.insert(insert_pos + 1, json!({
+                    "userInputMessage": {
+                        "content": "Continue",
+                        "modelId": "claude-sonnet-4-20250514",
+                        "origin": "AI_EDITOR"
+                    }
+                }));
+            }
+        }
+
+        let final_size = serde_json::to_string(history as &Vec<Value>)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        warn!(
+            "[Kiro] Payload slimmed: removed {} of {} history messages (history was ~{} KB, now ~{} KB)",
+            removed,
+            original_len,
+            history_size / 1024,
+            final_size / 1024
+        );
+    }
 }
 
 // ===== AWS Event Stream Parser =====
@@ -1063,6 +1219,15 @@ fn classify_kiro_event(val: Value) -> KiroEvent {
 const CLAUDE_CORRECTION_FACTOR: f64 = 1.15;
 
 const TOOL_DESCRIPTION_MAX_LENGTH: usize = 10000;
+
+/// Maximum payload size in characters before history slimming kicks in.
+/// AWS Q generateAssistantResponse has an undocumented request body limit.
+/// Empirically, payloads over ~128KB consistently fail with "Improperly formed request".
+const MAX_PAYLOAD_CHARS: usize = 120_000;
+
+/// Maximum number of history messages to keep when slimming.
+/// Even within size limits, extremely long histories can cause issues.
+const MAX_HISTORY_MESSAGES: usize = 100;
 
 /// First-token timeout: how long to wait for the first chunk before retrying
 const FIRST_TOKEN_TIMEOUT_SECS: u64 = 120;
