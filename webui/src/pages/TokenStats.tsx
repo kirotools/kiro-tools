@@ -87,26 +87,26 @@ const TokenStats: React.FC = () => {
     const fetchData = async () => {
         setLoading(true);
         try {
-            let hours = 24;
+            let summaryHours = 1; // hours parameter for summary/account/model stats (1 time unit)
             let data: TokenStatsAggregated[] = [];
             let modelTrend: ModelTrendPoint[] = [];
             let accountTrend: AccountTrendPoint[] = [];
 
             switch (timeRange) {
                 case 'hourly':
-                    hours = 24;
+                    summaryHours = 1; // 最近 1 小时的汇总
                     data = await invoke<TokenStatsAggregated[]>('get_token_stats_hourly', { hours: 24 });
                     modelTrend = await invoke<ModelTrendPoint[]>('get_token_stats_model_trend_hourly', { hours: 24 });
                     accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_hourly', { hours: 24 });
                     break;
                 case 'daily':
-                    hours = 168;
+                    summaryHours = 24; // 最近 1 天的汇总
                     data = await invoke<TokenStatsAggregated[]>('get_token_stats_daily', { days: 7 });
                     modelTrend = await invoke<ModelTrendPoint[]>('get_token_stats_model_trend_daily', { days: 7 });
                     accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_daily', { days: 7 });
                     break;
                 case 'weekly':
-                    hours = 720;
+                    summaryHours = 168; // 最近 1 周的汇总
                     data = await invoke<TokenStatsAggregated[]>('get_token_stats_weekly', { weeks: 4 });
                     modelTrend = await invoke<ModelTrendPoint[]>('get_token_stats_model_trend_daily', { days: 30 });
                     accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_daily', { days: 30 });
@@ -153,9 +153,9 @@ const TokenStats: React.FC = () => {
             setAccountTrendData(transformedAccountTrend);
 
             const [accounts, models_stats, summaryData] = await Promise.all([
-                invoke<AccountTokenStats[]>('get_token_stats_by_account', { hours }),
-                invoke<ModelTokenStats[]>('get_token_stats_by_model', { hours }),
-                invoke<TokenStatsSummary>('get_token_stats_summary', { hours })
+                invoke<AccountTokenStats[]>('get_token_stats_by_account', { hours: summaryHours }),
+                invoke<ModelTokenStats[]>('get_token_stats_by_model', { hours: summaryHours }),
+                invoke<TokenStatsSummary>('get_token_stats_summary', { hours: summaryHours })
             ]);
 
             setAccountData(Array.isArray(accounts) ? accounts : []);
