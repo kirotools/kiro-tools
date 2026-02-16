@@ -115,6 +115,11 @@ pub async fn handle_messages(
     let needs_wait = !token_manager.has_available_slot(&account_id);
     let pending_log_id = if needs_wait {
         let log_id = uuid::Uuid::new_v4().to_string();
+        let pending_source_model = if mapped_model.is_some() {
+            Some(original_model.clone())
+        } else {
+            Some(request.model.clone())
+        };
         let pending_log = crate::proxy::monitor::ProxyRequestLog {
             id: log_id.clone(),
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -122,8 +127,8 @@ pub async fn handle_messages(
             url: "/v1/messages".to_string(),
             status: 0,
             duration: 0,
-            model: Some(request.model.clone()),
-            mapped_model: None,
+            model: pending_source_model,
+            mapped_model: mapped_model.clone(),
             account_email: Some(email.clone()),
             client_ip: None,
             error: None,
@@ -158,6 +163,11 @@ pub async fn handle_messages(
         None => {
             // Timeout — update pending log to show timeout error
             if let Some(ref log_id) = pending_log_id {
+                let timeout_source_model = if mapped_model.is_some() {
+                    Some(original_model.clone())
+                } else {
+                    Some(request.model.clone())
+                };
                 let timeout_log = crate::proxy::monitor::ProxyRequestLog {
                     id: log_id.clone(),
                     timestamp: chrono::Utc::now().timestamp_millis(),
@@ -165,8 +175,8 @@ pub async fn handle_messages(
                     url: "/v1/messages".to_string(),
                     status: 503,
                     duration: 30000,
-                    model: Some(request.model.clone()),
-                    mapped_model: None,
+                    model: timeout_source_model,
+                    mapped_model: mapped_model.clone(),
                     account_email: Some(email.clone()),
                     client_ip: None,
                     error: Some("Concurrency slot timeout (30s)".to_string()),

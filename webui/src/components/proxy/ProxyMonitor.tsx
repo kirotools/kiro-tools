@@ -92,7 +92,7 @@ const LogTable: React.FC<LogTableProps> = ({
                             <td className="font-bold" style={{ width: '60px' }}>{log.method}</td>
                             <td className="text-blue-600 truncate" style={{ width: '220px', maxWidth: '220px' }}>
                                 {log.mapped_model && log.model !== log.mapped_model
-                                    ? `${log.model} => ${log.mapped_model}`
+                                    ? `${log.model} -> ${log.mapped_model}`
                                     : (log.model || '-')}
                             </td>
                             <td style={{ width: '70px' }}>
@@ -536,7 +536,11 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                         )}
                                         <div className="space-y-1.5">
                                             <span className="block text-gray-500 dark:text-gray-400 uppercase font-black text-[10px] tracking-widest">{t('monitor.details.model')}</span>
-                                            <span className="font-mono font-black text-blue-600 dark:text-blue-400 break-all text-sm">{selectedLog.model || '-'}</span>
+                                            <span className="font-mono font-black text-blue-600 dark:text-blue-400 break-all text-sm">
+                                                {selectedLog.mapped_model && selectedLog.model !== selectedLog.mapped_model
+                                                    ? `${selectedLog.model} -> ${selectedLog.mapped_model}`
+                                                    : (selectedLog.model || '-')}
+                                            </span>
                                         </div>
                                         {selectedLog.mapped_model && selectedLog.model !== selectedLog.mapped_model && (
                                             <div className="space-y-1.5">

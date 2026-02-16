@@ -22,10 +22,15 @@ fn record_user_token_usage(
     user_agent: Option<String>,
 ) {
     if let Some(identity) = user_token_identity {
+        let effective_model = log
+            .mapped_model
+            .as_deref()
+            .or(log.model.as_deref())
+            .unwrap_or("unknown");
         let _ = crate::modules::user_token_db::record_token_usage_and_ip(
             &identity.token_id,
             log.client_ip.as_deref().unwrap_or("127.0.0.1"),
-            log.model.as_deref().unwrap_or("unknown"),
+            effective_model,
             log.input_tokens.unwrap_or(0) as i32,
             log.output_tokens.unwrap_or(0) as i32,
             log.status as u16,
@@ -132,12 +137,23 @@ pub async fn monitor_middleware(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Extract mapped model from X-Mapped-Model header if present
+    // Extract original/mapped model from response headers if present.
+    // These are set by upstream handlers when alias routing happens.
+    let original_model_from_header = response
+        .headers()
+        .get("X-Original-Model")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let mapped_model = response
         .headers()
         .get("X-Mapped-Model")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+
+    if original_model_from_header.is_some() {
+        model = original_model_from_header;
+    }
 
     // Determine protocol from URL path
     let protocol = if uri.contains("/v1/messages") {

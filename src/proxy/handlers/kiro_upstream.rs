@@ -2481,6 +2481,7 @@ pub async fn handle_kiro_messages(
 
     // 4. Stream the response — parse AWS event stream and convert to Anthropic SSE
     let model = request.model.clone();
+    let routed_model_for_header = request.model.clone();
     let trace_id_owned = trace_id.to_string();
     let estimated_input = estimate_request_tokens(request);
 
@@ -2615,8 +2616,9 @@ pub async fn handle_kiro_messages(
             .header("X-Accel-Buffering", "no")
             .header("X-Account-Email", email)
             .header("X-Kiro-Upstream", "true");
-        if let Some(orig) = original_model {
-            resp_builder = resp_builder.header("X-Mapped-Model", orig);
+        if original_model.is_some() {
+            resp_builder = resp_builder.header("X-Original-Model", original_model.unwrap_or_default());
+            resp_builder = resp_builder.header("X-Mapped-Model", &routed_model_for_header);
         }
         resp_builder
             .body(Body::from_stream(sse_stream))
@@ -2689,8 +2691,9 @@ pub async fn handle_kiro_messages(
             .header(header::CONTENT_TYPE, "application/json")
             .header("X-Account-Email", email)
             .header("X-Kiro-Upstream", "true");
-        if let Some(orig) = original_model {
-            resp_builder = resp_builder.header("X-Mapped-Model", orig);
+        if original_model.is_some() {
+            resp_builder = resp_builder.header("X-Original-Model", original_model.unwrap_or_default());
+            resp_builder = resp_builder.header("X-Mapped-Model", &routed_model_for_header);
         }
         resp_builder
             .body(Body::from(serde_json::to_string(&response_json).unwrap()))
