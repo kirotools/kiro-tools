@@ -22,6 +22,7 @@ use crate::proxy::mappers::claude::models::{
 use crate::proxy::token_manager::ConcurrencySlot;
 use crate::proxy::upstream::thinking_parser::{ThinkingParser, ThinkingEvent};
 use crate::proxy::upstream::parsers::parse_bracket_tool_calls;
+use crate::proxy::upstream::retry::parse_retry_delay;
 
 // ===== Kiro Headers =====
 
@@ -137,7 +138,7 @@ fn extract_tool_uses(content: &MessageContent) -> Vec<Value> {
             if let ContentBlock::ToolUse { id, name, input, .. } = block {
                 tool_uses.push(json!({
                     "toolUseId": id,
-                    "name": sanitize_tool_name(name),
+                    "name": name,
                     "input": input
                 }));
             }
@@ -184,72 +185,161 @@ fn extract_tool_results(content: &MessageContent) -> Vec<Value> {
 }
 
 // ===== JSON Schema & Tool Name Sanitization =====
-// Ported from kiro-gateway converters_core.py:
-// Kiro API returns 400 "Improperly formed request" if:
-// - tool inputSchema contains `additionalProperties`
-// - tool inputSchema has `required: []` (empty array)
-// - tool name contains `$` prefix or exceeds 64 characters
+// Ported from kiro-gateway converters_core.py
 
-/// Recursively sanitize a JSON Schema by removing fields that Kiro API rejects.
-fn sanitize_json_schema(schema: &Value) -> Value {
-    match schema {
-        Value::Object(map) => {
-            let mut result = serde_json::Map::new();
-            for (key, value) in map {
-                // Skip empty required arrays
-                if key == "required" {
-                    if let Value::Array(arr) = value {
-                        if arr.is_empty() {
-                            continue;
-                        }
+/// Maximum allowed tool name length per Kiro/AWS Q API.
+const TOOL_NAME_MAX_LENGTH: usize = 64;
+
+/// Threshold for "long description" — descriptions longer than this get moved to system prompt.
+const LONG_DESC_THRESHOLD: usize = 8000;
+
+/// Sanitize a JSON schema to remove fields that Kiro/AWS Q API doesn't support.
+/// Removes `additionalProperties` and empty `required: []` recursively.
+/// Ported from kiro-gateway converters_core.py sanitize_json_schema().
+fn sanitize_json_schema(schema: &mut Value) {
+    if let Some(obj) = schema.as_object_mut() {
+        // Remove additionalProperties (Kiro API doesn't support it)
+        obj.remove("additionalProperties");
+
+        // Remove empty required: [] (causes validation errors)
+        if let Some(req) = obj.get("required") {
+            if req.as_array().map(|a| a.is_empty()).unwrap_or(false) {
+                obj.remove("required");
+            }
+        }
+
+        // Recursively sanitize nested schemas
+        // properties
+        if let Some(props) = obj.get_mut("properties") {
+            if let Some(props_obj) = props.as_object_mut() {
+                for (_, prop_schema) in props_obj.iter_mut() {
+                    sanitize_json_schema(prop_schema);
+                }
+            }
+        }
+
+        // items (for array types)
+        if let Some(items) = obj.get_mut("items") {
+            sanitize_json_schema(items);
+        }
+
+        // anyOf / oneOf / allOf
+        for key in &["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = obj.get_mut(*key) {
+                if let Some(arr) = variants.as_array_mut() {
+                    for variant in arr.iter_mut() {
+                        sanitize_json_schema(variant);
                     }
                 }
-                // Skip additionalProperties — Kiro API doesn't support it
-                if key == "additionalProperties" {
-                    continue;
-                }
-                // Recursively process nested objects and arrays
-                result.insert(key.clone(), sanitize_json_schema(value));
             }
-            Value::Object(result)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(sanitize_json_schema).collect())
-        }
-        other => other.clone(),
     }
 }
 
-/// Sanitize a tool name for Kiro API compatibility:
-/// - Strip `$` prefix (Anthropic computer-use naming like `$Bash`)
-/// - Truncate to 64 characters (Kiro API limit)
-fn sanitize_tool_name(name: &str) -> String {
+/// Sanitize a tool name: strip leading '$', truncate to TOOL_NAME_MAX_LENGTH.
+/// Returns None if the name is empty after sanitization.
+fn sanitize_tool_name(name: &str) -> Option<String> {
     let cleaned = name.strip_prefix('$').unwrap_or(name);
-    if cleaned.len() > 64 {
-        cleaned[..64].to_string()
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.len() > TOOL_NAME_MAX_LENGTH {
+        Some(cleaned[..TOOL_NAME_MAX_LENGTH].to_string())
     } else {
-        cleaned.to_string()
+        Some(cleaned.to_string())
     }
 }
 
-/// Build tool specifications from Anthropic tools definition
-fn build_tool_specifications(tools: &[crate::proxy::mappers::claude::models::Tool], max_desc_length: usize) -> Vec<Value> {
+/// Validate tool names. Returns Err with details if any name is invalid (> 64 chars).
+fn validate_tool_names(tools: &[crate::proxy::mappers::claude::models::Tool]) -> Result<(), String> {
+    for tool in tools {
+        if let Some(name) = &tool.name {
+            let cleaned = name.strip_prefix('$').unwrap_or(name);
+            if cleaned.len() > TOOL_NAME_MAX_LENGTH {
+                return Err(format!(
+                    "Tool name '{}...' exceeds {} character limit ({} chars). Shorten the tool name.",
+                    &cleaned[..40.min(cleaned.len())],
+                    TOOL_NAME_MAX_LENGTH,
+                    cleaned.len()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Process tools with long descriptions: move long descriptions to system prompt,
+/// leave a short reference in the tool spec.
+/// Returns (modified_tools_descriptions, system_prompt_addition).
+/// Ported from kiro-gateway converters_core.py process_tools_with_long_descriptions().
+fn process_long_tool_descriptions(tools: &[crate::proxy::mappers::claude::models::Tool]) -> (Vec<(String, String)>, String) {
+    let mut overrides: Vec<(String, String)> = Vec::new(); // (name, short_desc)
+    let mut system_additions: Vec<String> = Vec::new();
+
+    for tool in tools {
+        let name = tool.name.as_deref().unwrap_or("");
+        let desc = tool.description.as_deref().unwrap_or("");
+
+        if desc.len() > LONG_DESC_THRESHOLD {
+            // Move full description to system prompt
+            system_additions.push(format!(
+                "## Tool: {}\n\n{}",
+                name, desc
+            ));
+            // Leave short reference in tool spec
+            overrides.push((
+                name.to_string(),
+                format!(
+                    "See full documentation in system prompt under '## Tool: {}'. Summary: {}",
+                    name,
+                    if desc.len() > 200 { &desc[..200] } else { desc }
+                ),
+            ));
+        }
+    }
+
+    let system_text = if system_additions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n---\n# Tool Documentation\n\nThe following tools have detailed documentation that was moved here to save space:\n\n{}",
+            system_additions.join("\n\n")
+        )
+    };
+
+    (overrides, system_text)
+}
+
+/// Build tool specifications from Anthropic tools definition.
+/// Applies schema sanitization, name sanitization, and description truncation.
+fn build_tool_specifications(
+    tools: &[crate::proxy::mappers::claude::models::Tool],
+    max_desc_length: usize,
+    desc_overrides: &[(String, String)],
+) -> Vec<Value> {
     tools
         .iter()
         .filter_map(|tool| {
-            let name = tool.name.as_deref()?;
-            let name = sanitize_tool_name(name);
-            let description = tool.description.as_deref().unwrap_or("");
-            // Ensure non-empty description (Kiro API requires it)
-            let description = if description.trim().is_empty() {
-                format!("Tool: {}", name)
-            } else if max_desc_length > 0 && description.len() > max_desc_length {
-                description[..max_desc_length].to_string()
+            let raw_name = tool.name.as_deref()?;
+            let name = sanitize_tool_name(raw_name)?;
+
+            // Check for description override (from long desc → system prompt)
+            let description = if let Some((_, short_desc)) = desc_overrides.iter().find(|(n, _)| n == raw_name) {
+                short_desc.clone()
             } else {
-                description.to_string()
+                let desc = tool.description.as_deref().unwrap_or("");
+                if desc.trim().is_empty() {
+                    format!("Tool: {}", name)
+                } else if max_desc_length > 0 && desc.len() > max_desc_length {
+                    desc[..max_desc_length].to_string()
+                } else {
+                    desc.to_string()
+                }
             };
-            let schema = tool.input_schema.clone().unwrap_or(json!({}));
-            let schema = sanitize_json_schema(&schema);
+
+            let mut schema = tool.input_schema.clone().unwrap_or(json!({}));
+            sanitize_json_schema(&mut schema);
+
             Some(json!({
                 "toolSpecification": {
                     "name": name,
@@ -665,6 +755,14 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
 
     // 1. Extract system prompt and add thinking system prompt addition
     let thinking_system_addition = get_thinking_system_prompt_addition();
+
+    // 1b. Process long tool descriptions → move to system prompt
+    let (desc_overrides, long_desc_system_addition) = if let Some(tools) = &request.tools {
+        process_long_tool_descriptions(tools)
+    } else {
+        (Vec::new(), String::new())
+    };
+
     let system_text = {
         let base = request.system.as_ref().map(|sp| match sp {
             SystemPrompt::String(s) => s.clone(),
@@ -674,11 +772,19 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
                 .collect::<Vec<_>>()
                 .join("\n"),
         }).unwrap_or_default();
-        if base.is_empty() {
-            Some(thinking_system_addition)
+
+        let mut sys = if base.is_empty() {
+            thinking_system_addition
         } else {
-            Some(format!("{}\n{}", base, thinking_system_addition))
+            format!("{}\n{}", base, thinking_system_addition)
+        };
+
+        // Append long tool descriptions to system prompt
+        if !long_desc_system_addition.is_empty() {
+            sys.push_str(&long_desc_system_addition);
         }
+
+        Some(sys)
     };
 
     // 2. Preprocess messages: strip tool content or fix orphaned tool_results
@@ -814,7 +920,7 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
 
     // Add tool specifications under "tools" key (NOT "toolSpecification")
     if let Some(tools) = &request.tools {
-        let specs = build_tool_specifications(tools, TOOL_DESCRIPTION_MAX_LENGTH);
+        let specs = build_tool_specifications(tools, TOOL_DESCRIPTION_MAX_LENGTH, &desc_overrides);
         if !specs.is_empty() {
             user_input_context.insert("tools".to_string(), json!(specs));
         }
@@ -858,63 +964,224 @@ fn convert_to_kiro_payload(request: &ClaudeRequest, profile_arn: Option<&str>) -
     payload
 }
 
-/// Slim a Kiro payload by trimming conversation history when it exceeds size limits.
+/// Slim a Kiro payload to fit within the AWS Q request body limit (~128 KB).
 ///
-/// The function measures the **total serialized payload size** (not just history) because
-/// tool specifications, currentMessage, and other fields can contribute 100+ KB of overhead
-/// that the upstream API counts against its ~128 KB request body limit.
+/// The function addresses ALL oversized components, not just history:
 ///
-/// Strategy (sliding window from the front):
-/// 1. If history has more than MAX_HISTORY_MESSAGES entries, drop oldest pairs first
-/// 2. Calculate non-history overhead (tools, currentMessage, wrapper) dynamically
-/// 3. Trim oldest history entries until total payload fits within MAX_PAYLOAD_CHARS
-/// 4. Always preserve the first 2 messages (system prompt) and last few turns
-/// 5. Insert a synthetic summary message at the splice point to notify the model
+/// Phase 1: Truncate oversized tool results (currentMessage.toolResults)
+///          - Each tool result text is capped at MAX_TOOL_RESULT_CHARS
+///          - This is often the biggest contributor (single tool result can be 70+ KB)
+/// Phase 2: Truncate tool descriptions (currentMessage.tools[].description)
+///          - Capped at SLIM_TOOL_DESC_MAX chars (shorter than build-time limit)
+/// Phase 3: Trim conversation history
+///          a. Message count limit (MAX_HISTORY_MESSAGES)
+///          b. Progressively remove oldest messages until payload fits
+/// Phase 4: As last resort, truncate large text in individual history messages
+fn payload_size(payload: &Value) -> usize {
+    serde_json::to_string(payload).map(|s| s.len()).unwrap_or(0)
+}
+
 fn slim_kiro_payload(payload: &mut Value) {
-    // Step 1: Measure the TOTAL serialized payload size
+    let initial_size = payload_size(payload);
+    if initial_size <= MAX_PAYLOAD_CHARS {
+        return; // Already within budget
+    }
+
+    let mut actions: Vec<String> = Vec::new();
+
+    // ===== Phase 1: Truncate tool results =====
+    let tool_results_truncated = truncate_tool_results(payload, MAX_TOOL_RESULT_CHARS);
+    if tool_results_truncated > 0 {
+        actions.push(format!("truncated {} tool results", tool_results_truncated));
+    }
+    if payload_size(payload) <= MAX_PAYLOAD_CHARS {
+        log_slim_result(initial_size, payload_size(payload), &actions);
+        return;
+    }
+
+    // ===== Phase 2: Truncate tool descriptions =====
+    let descs_truncated = truncate_tool_descriptions(payload, SLIM_TOOL_DESC_MAX);
+    if descs_truncated > 0 {
+        actions.push(format!("truncated {} tool descriptions", descs_truncated));
+    }
+    if payload_size(payload) <= MAX_PAYLOAD_CHARS {
+        log_slim_result(initial_size, payload_size(payload), &actions);
+        return;
+    }
+
+    // ===== Phase 3: Trim history =====
+    let history_removed = trim_history(payload);
+    if history_removed > 0 {
+        actions.push(format!("removed {} history messages", history_removed));
+    }
+    if payload_size(payload) <= MAX_PAYLOAD_CHARS {
+        log_slim_result(initial_size, payload_size(payload), &actions);
+        return;
+    }
+
+    // ===== Phase 4: Truncate large text in remaining history messages =====
+    let msgs_truncated = truncate_large_history_messages(payload, MAX_HISTORY_MSG_CHARS);
+    if msgs_truncated > 0 {
+        actions.push(format!("truncated {} large history messages", msgs_truncated));
+    }
+
+    log_slim_result(initial_size, payload_size(payload), &actions);
+}
+
+fn log_slim_result(initial: usize, final_size: usize, actions: &[String]) {
+    let saved = initial.saturating_sub(final_size);
+    let status = if final_size <= MAX_PAYLOAD_CHARS { "OK" } else { "STILL OVER" };
+    warn!(
+        "[Kiro] Payload slimmed [{}]: ~{} KB → ~{} KB (saved ~{} KB) | Actions: {}",
+        status,
+        initial / 1024,
+        final_size / 1024,
+        saved / 1024,
+        actions.join(", ")
+    );
+}
+
+/// Truncate each tool result's text content to max_chars.
+/// Returns the number of results truncated.
+fn truncate_tool_results(payload: &mut Value, max_chars: usize) -> usize {
+    let results = match payload
+        .pointer_mut("/conversationState/currentMessage/userInputMessage/userInputMessageContext/toolResults")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    let mut count = 0;
+    for result in results.iter_mut() {
+        // Tool results can have content as string or array of {text: "..."}
+        if let Some(content) = result.get_mut("content") {
+            if let Some(arr) = content.as_array_mut() {
+                for item in arr.iter_mut() {
+                    if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()).map(|s| s.to_string()) {
+                        if text.len() > max_chars {
+                            let truncated = format!(
+                                "{}...\n\n[Content truncated: {} chars removed to fit API limits]",
+                                &text[..max_chars],
+                                text.len() - max_chars
+                            );
+                            item["text"] = json!(truncated);
+                            count += 1;
+                        }
+                    }
+                }
+            } else if let Some(text) = content.as_str().map(|s| s.to_string()) {
+                if text.len() > max_chars {
+                    let truncated = format!(
+                        "{}...\n\n[Content truncated: {} chars removed to fit API limits]",
+                        &text[..max_chars],
+                        text.len() - max_chars
+                    );
+                    *content = json!(truncated);
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    // Also truncate tool results in history messages
+    if let Some(history) = payload
+        .pointer_mut("/conversationState/history")
+        .and_then(|v| v.as_array_mut())
+    {
+        for msg in history.iter_mut() {
+            // Check userInputMessage.userInputMessageContext.toolResults
+            if let Some(results) = msg
+                .pointer_mut("/userInputMessage/userInputMessageContext/toolResults")
+                .and_then(|v| v.as_array_mut())
+            {
+                for result in results.iter_mut() {
+                    if let Some(content) = result.get_mut("content") {
+                        if let Some(arr) = content.as_array_mut() {
+                            for item in arr.iter_mut() {
+                                if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()).map(|s| s.to_string()) {
+                                    if text.len() > max_chars {
+                                        let truncated = format!(
+                                            "{}...\n\n[Content truncated: {} chars removed]",
+                                            &text[..max_chars],
+                                            text.len() - max_chars
+                                        );
+                                        item["text"] = json!(truncated);
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        } else if let Some(text) = content.as_str().map(|s| s.to_string()) {
+                            if text.len() > max_chars {
+                                let truncated = format!(
+                                    "{}...\n\n[Content truncated: {} chars removed]",
+                                    &text[..max_chars],
+                                    text.len() - max_chars
+                                );
+                                *content = json!(truncated);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// Truncate tool descriptions to max_chars.
+/// Returns the number of descriptions truncated.
+fn truncate_tool_descriptions(payload: &mut Value, max_chars: usize) -> usize {
+    let tools = match payload
+        .pointer_mut("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    let mut count = 0;
+    for tool in tools.iter_mut() {
+        if let Some(desc) = tool
+            .pointer_mut("/toolSpecification/description")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string())
+        {
+            if desc.len() > max_chars {
+                tool["toolSpecification"]["description"] = json!(&desc[..max_chars]);
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Trim history messages: enforce count limit and remove oldest until payload fits.
+/// Returns the number of messages removed.
+fn trim_history(payload: &mut Value) -> usize {
+    // Need total and history measurements
     let total_payload_size = serde_json::to_string(&*payload)
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // Quick exit: if total payload fits within budget, nothing to do
-    // (also check message count below)
-    let needs_size_trim = total_payload_size > MAX_PAYLOAD_CHARS;
-
-    // Step 2: Get mutable access to history
-    let history_value = match payload
-        .get_mut("conversationState")
-        .and_then(|cs| cs.get_mut("history"))
+    let history = match payload
+        .pointer_mut("/conversationState/history")
+        .and_then(|v| v.as_array_mut())
     {
-        Some(h) => h,
-        None => return,
-    };
-
-    let history = match history_value.as_array_mut() {
         Some(h) if h.len() > 2 => h,
-        _ => return,
+        _ => return 0,
     };
-
-    let needs_count_trim = history.len() > MAX_HISTORY_MESSAGES;
-
-    if !needs_size_trim && !needs_count_trim {
-        return;
-    }
 
     let original_len = history.len();
-
-    // Measure history size to calculate non-history overhead dynamically
-    let original_history_size = serde_json::to_string(history as &Vec<Value>)
+    let history_size = serde_json::to_string(history as &Vec<Value>)
         .map(|s| s.len())
         .unwrap_or(0);
-
-    // Non-history overhead = total payload - history (tools, currentMessage, wrapper JSON, etc.)
-    // This is the ACTUAL overhead, not a 2KB guess
-    let non_history_overhead = total_payload_size.saturating_sub(original_history_size);
-
-    // History budget = what's left after accounting for non-history parts
+    let non_history_overhead = total_payload_size.saturating_sub(history_size);
     let history_budget = MAX_PAYLOAD_CHARS.saturating_sub(non_history_overhead);
 
-    // Phase 1: Enforce message count limit
+    // Enforce message count limit
     if history.len() > MAX_HISTORY_MESSAGES {
         let keep_front = 2;
         let keep_back = MAX_HISTORY_MESSAGES.saturating_sub(4);
@@ -924,77 +1191,99 @@ fn slim_kiro_payload(payload: &mut Value) {
         }
     }
 
-    // Phase 2: Enforce payload size limit using the REAL overhead
-    let mut current_history_size = if needs_size_trim {
-        serde_json::to_string(history as &Vec<Value>)
-            .map(|s| s.len())
-            .unwrap_or(0)
-    } else {
-        0 // won't enter the loop
-    };
-
+    // Progressively remove oldest until within budget
+    let mut current_size = serde_json::to_string(history as &Vec<Value>)
+        .map(|s| s.len())
+        .unwrap_or(0);
     let keep_front = 2;
-    while current_history_size > history_budget && history.len() > 4 {
+    while current_size > history_budget && history.len() > 4 {
         let remove = std::cmp::min(2, history.len() - 4);
         history.drain(keep_front..keep_front + remove);
-        current_history_size = serde_json::to_string(history as &Vec<Value>)
+        current_size = serde_json::to_string(history as &Vec<Value>)
             .map(|s| s.len())
             .unwrap_or(0);
     }
 
     let removed = original_len - history.len();
-    if removed == 0 {
-        return;
-    }
+    if removed > 0 {
+        // Insert synthetic summary at splice point
+        let summary_msg = json!({
+            "assistantResponseMessage": {
+                "content": format!(
+                    "[System: {} earlier messages were omitted to fit context window limits.]",
+                    removed
+                )
+            }
+        });
+        let insert_pos = std::cmp::min(2, history.len());
+        history.insert(insert_pos, summary_msg);
 
-    // Insert a synthetic summary message at the splice point
-    let summary_msg = json!({
-        "assistantResponseMessage": {
-            "content": format!(
-                "[System: {} earlier messages were omitted to fit context window limits. \
-                 The conversation continues from this point.]",
-                removed
-            )
-        }
-    });
-    let insert_pos = std::cmp::min(2, history.len());
-    history.insert(insert_pos, summary_msg);
-
-    // Ensure alternating roles remain valid after insertion
-    if insert_pos + 1 < history.len() {
-        let next_is_assistant = history[insert_pos + 1]
-            .get("assistantResponseMessage")
-            .is_some();
-        if next_is_assistant {
-            history.insert(
-                insert_pos + 1,
-                json!({
-                    "userInputMessage": {
-                        "content": "Continue",
-                        "modelId": "claude-sonnet-4-20250514",
-                        "origin": "AI_EDITOR"
-                    }
-                }),
-            );
+        if insert_pos + 1 < history.len() {
+            let next_is_assistant = history[insert_pos + 1]
+                .get("assistantResponseMessage")
+                .is_some();
+            if next_is_assistant {
+                history.insert(
+                    insert_pos + 1,
+                    json!({
+                        "userInputMessage": {
+                            "content": "Continue",
+                            "modelId": "claude-sonnet-4-20250514",
+                            "origin": "AI_EDITOR"
+                        }
+                    }),
+                );
+            }
         }
     }
+    removed
+}
 
-    let final_history_size = serde_json::to_string(history as &Vec<Value>)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let estimated_final_total = final_history_size + non_history_overhead;
+/// Truncate large text content within individual history messages.
+/// Returns the number of messages truncated.
+fn truncate_large_history_messages(payload: &mut Value, max_chars: usize) -> usize {
+    let history = match payload
+        .pointer_mut("/conversationState/history")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(h) => h,
+        _ => return 0,
+    };
 
-    warn!(
-        "[Kiro] Payload slimmed: removed {} of {} history messages \
-         (total: ~{} KB → ~{} KB, history: ~{} KB → ~{} KB, overhead: ~{} KB)",
-        removed,
-        original_len,
-        total_payload_size / 1024,
-        estimated_final_total / 1024,
-        original_history_size / 1024,
-        final_history_size / 1024,
-        non_history_overhead / 1024
-    );
+    let mut count = 0;
+    for msg in history.iter_mut() {
+        // Truncate user message content
+        if let Some(content) = msg
+            .pointer_mut("/userInputMessage/content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+        {
+            if content.len() > max_chars {
+                msg["userInputMessage"]["content"] = json!(format!(
+                    "{}...\n[truncated {} chars]",
+                    &content[..max_chars],
+                    content.len() - max_chars
+                ));
+                count += 1;
+            }
+        }
+        // Truncate assistant message content
+        if let Some(content) = msg
+            .pointer_mut("/assistantResponseMessage/content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+        {
+            if content.len() > max_chars {
+                msg["assistantResponseMessage"]["content"] = json!(format!(
+                    "{}...\n[truncated {} chars]",
+                    &content[..max_chars],
+                    content.len() - max_chars
+                ));
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 // ===== AWS Event Stream Parser =====
@@ -1270,10 +1559,24 @@ const MAX_PAYLOAD_CHARS: usize = 120_000;
 /// Even within size limits, extremely long histories can cause issues.
 const MAX_HISTORY_MESSAGES: usize = 100;
 
-/// First-token timeout: how long to wait for the first chunk before retrying
-const FIRST_TOKEN_TIMEOUT_SECS: u64 = 120;
-/// Maximum number of transparent retries on first-token timeout
-const FIRST_TOKEN_MAX_RETRIES: u32 = 1;
+/// Maximum chars per individual tool result content when slimming.
+/// Tool results (e.g., file reads, bash output) can be 30-70 KB each.
+const MAX_TOOL_RESULT_CHARS: usize = 8_000;
+
+/// Stricter tool description length used during slim (vs TOOL_DESCRIPTION_MAX_LENGTH at build time).
+/// At build time we allow 10,000 chars, but during slim we cut to 3,000 to reclaim space.
+const SLIM_TOOL_DESC_MAX: usize = 3_000;
+
+/// Maximum chars per individual history message text content during slim.
+/// Prevents single messages from dominating the budget.
+const MAX_HISTORY_MSG_CHARS: usize = 6_000;
+
+/// First-token timeout: how long to wait for the first chunk before retrying.
+/// Gateway uses 15-30s; 30s is a good balance for avoiding false timeouts.
+const FIRST_TOKEN_TIMEOUT_SECS: u64 = 30;
+/// Maximum number of transparent retries on first-token timeout.
+/// Gateway uses 3 retries with shorter timeout instead of 1 retry with long timeout.
+const FIRST_TOKEN_MAX_RETRIES: u32 = 3;
 
 fn estimate_tokens(text: &str) -> u32 {
     if text.is_empty() {
@@ -1761,6 +2064,17 @@ pub async fn handle_kiro_messages(
         );
     }
 
+    // Validate tool names early (reject > 64 chars with clear 400 error)
+    if let Some(tools) = &request.tools {
+        if let Err(msg) = validate_tool_names(tools) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                AnthropicErrorType::InvalidRequestError,
+                &msg,
+            );
+        }
+    }
+
     let fingerprint = get_machine_fingerprint();
     let kiro_host = get_kiro_q_host(region);
     let url = format!("{}/generateAssistantResponse", kiro_host);
@@ -1910,13 +2224,18 @@ pub async fn handle_kiro_messages(
                 );
             }
 
-            // 429 — rate limited, exponential backoff
+            // 429 — rate limited, prefer server-suggested delay over fixed backoff
             if status.as_u16() == 429 {
                 let error_text = response.text().await.unwrap_or_default();
                 if attempt < MAX_RETRIES - 1 {
-                    let delay = BASE_DELAY_MS * (1 << attempt);
-                    warn!("[{}] [Kiro] Received 429 (attempt {}/{}), waiting {}ms...",
-                        trace_id, attempt + 1, MAX_RETRIES, delay);
+                    // Try to extract server-suggested retry delay from error response
+                    let delay = parse_retry_delay(&error_text)
+                        .unwrap_or_else(|| BASE_DELAY_MS * (1 << attempt));
+                    // Cap at 30 seconds to avoid excessively long waits
+                    let delay = delay.min(30_000);
+                    warn!("[{}] [Kiro] Received 429 (attempt {}/{}), waiting {}ms (server-suggested: {})...",
+                        trace_id, attempt + 1, MAX_RETRIES, delay,
+                        parse_retry_delay(&error_text).map(|d| format!("{}ms", d)).unwrap_or_else(|| "none".to_string()));
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                     continue;
                 }
@@ -1962,12 +2281,20 @@ pub async fn handle_kiro_messages(
 
             // Log payload for 400 and other errors
             if status.as_u16() == 400 {
+                let payload_str = serde_json::to_string(&kiro_payload).unwrap_or_default();
+                let payload_size = payload_str.len();
                 error!(
-                    "[{}] [Kiro] 400 Bad Request - Payload: {} | Response: {}",
+                    "[{}] [Kiro] 400 Bad Request (payload: {} bytes) - Response: {}",
                     trace_id,
-                    serde_json::to_string(&kiro_payload).unwrap_or_default(),
+                    payload_size,
                     error_text
                 );
+                // Save first failing payload for debugging
+                let debug_path = format!("/tmp/kiro_failed_payload_{}.json", trace_id);
+                if let Ok(mut f) = std::fs::File::create(&debug_path) {
+                    let _ = std::io::Write::write_all(&mut f, payload_str.as_bytes());
+                    warn!("[{}] [Kiro] Saved failing payload to {}", trace_id, debug_path);
+                }
             } else {
                 error!(
                     "[{}] [Kiro] {} Error - Payload: {} | Response: {}",
@@ -2282,7 +2609,8 @@ mod tests {
             description: Some(long_desc.clone()),
             input_schema: Some(json!({"type": "object"})),
         }];
-        let specs = build_tool_specifications(&tools, 4096);
+        let no_overrides: Vec<(String, String)> = vec![];
+        let specs = build_tool_specifications(&tools, 4096, &no_overrides);
         let spec = &specs[0];
         let desc = spec["toolSpecification"]["description"].as_str().unwrap();
         assert_eq!(desc.len(), 4096);
@@ -2293,7 +2621,7 @@ mod tests {
             description: Some("short desc".to_string()),
             input_schema: Some(json!({"type": "object"})),
         }];
-        let specs2 = build_tool_specifications(&short_tools, 4096);
+        let specs2 = build_tool_specifications(&short_tools, 4096, &no_overrides);
         let desc2 = specs2[0]["toolSpecification"]["description"]
             .as_str()
             .unwrap();
@@ -2547,5 +2875,303 @@ mod tests {
         assert_eq!(tuples[2].0, "assistant");
         assert_eq!(tuples[3].0, "user");
         assert_eq!(tuples[4].0, "user");
+    }
+
+    // ===== New tests: sanitize_json_schema =====
+
+    #[test]
+    fn test_sanitize_json_schema_removes_additional_properties() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "additionalProperties": false
+        });
+        sanitize_json_schema(&mut schema);
+        assert!(schema.get("additionalProperties").is_none());
+        // properties should be unchanged
+        assert!(schema["properties"]["name"]["type"].as_str() == Some("string"));
+    }
+
+    #[test]
+    fn test_sanitize_json_schema_removes_empty_required() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "number" }
+            },
+            "required": []
+        });
+        sanitize_json_schema(&mut schema);
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_json_schema_keeps_nonempty_required() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "number" }
+            },
+            "required": ["x"]
+        });
+        sanitize_json_schema(&mut schema);
+        assert!(schema.get("required").is_some());
+        assert_eq!(schema["required"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_sanitize_json_schema_recursive() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "required": [],
+                    "properties": {
+                        "deep": {
+                            "type": "object",
+                            "additionalProperties": false
+                        }
+                    }
+                }
+            },
+            "additionalProperties": false,
+            "required": []
+        });
+        sanitize_json_schema(&mut schema);
+
+        // Top level
+        assert!(schema.get("additionalProperties").is_none());
+        assert!(schema.get("required").is_none());
+        // Nested level
+        let nested = &schema["properties"]["nested"];
+        assert!(nested.get("additionalProperties").is_none());
+        assert!(nested.get("required").is_none());
+        // Deep level
+        let deep = &nested["properties"]["deep"];
+        assert!(deep.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_json_schema_anyof() {
+        let mut schema = json!({
+            "anyOf": [
+                { "type": "string", "additionalProperties": false },
+                { "type": "object", "required": [], "additionalProperties": true }
+            ]
+        });
+        sanitize_json_schema(&mut schema);
+        for variant in schema["anyOf"].as_array().unwrap() {
+            assert!(variant.get("additionalProperties").is_none());
+            assert!(variant.get("required").is_none() || !variant["required"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_sanitize_json_schema_items() {
+        let mut schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": []
+            }
+        });
+        sanitize_json_schema(&mut schema);
+        let items = &schema["items"];
+        assert!(items.get("additionalProperties").is_none());
+        assert!(items.get("required").is_none());
+    }
+
+    // ===== New tests: sanitize_tool_name =====
+
+    #[test]
+    fn test_sanitize_tool_name_strips_dollar() {
+        assert_eq!(sanitize_tool_name("$bash"), Some("bash".to_string()));
+        assert_eq!(sanitize_tool_name("normal"), Some("normal".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_truncates_long_names() {
+        let long_name = "a".repeat(100);
+        let result = sanitize_tool_name(&long_name).unwrap();
+        assert_eq!(result.len(), TOOL_NAME_MAX_LENGTH);
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_empty_after_strip() {
+        assert_eq!(sanitize_tool_name("$"), None);
+        assert_eq!(sanitize_tool_name(""), None);
+    }
+
+    // ===== New tests: validate_tool_names =====
+
+    #[test]
+    fn test_validate_tool_names_ok() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![
+            Tool {
+                type_: None,
+                name: Some("read_file".to_string()),
+                description: Some("Read a file".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        assert!(validate_tool_names(&tools).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_names_too_long() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![
+            Tool {
+                type_: None,
+                name: Some("a".repeat(100)),
+                description: Some("desc".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        let result = validate_tool_names(&tools);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds"));
+    }
+
+    #[test]
+    fn test_validate_tool_names_dollar_prefix_still_validated() {
+        use crate::proxy::mappers::claude::models::Tool;
+        // $+63 chars = 64 without $ : should pass
+        let tools = vec![
+            Tool {
+                type_: None,
+                name: Some(format!("${}", "a".repeat(64))),
+                description: Some("desc".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        assert!(validate_tool_names(&tools).is_ok());
+
+        // $+65 chars = 65 without $ : should fail
+        let tools2 = vec![
+            Tool {
+                type_: None,
+                name: Some(format!("${}", "a".repeat(65))),
+                description: Some("desc".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        assert!(validate_tool_names(&tools2).is_err());
+    }
+
+    // ===== New tests: process_long_tool_descriptions =====
+
+    #[test]
+    fn test_process_long_descriptions_no_long() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![
+            Tool {
+                type_: None,
+                name: Some("test".to_string()),
+                description: Some("short desc".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        let (overrides, system_text) = process_long_tool_descriptions(&tools);
+        assert!(overrides.is_empty());
+        assert!(system_text.is_empty());
+    }
+
+    #[test]
+    fn test_process_long_descriptions_moves_to_system() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let long_desc = "x".repeat(LONG_DESC_THRESHOLD + 100);
+        let tools = vec![
+            Tool {
+                type_: None,
+                name: Some("big_tool".to_string()),
+                description: Some(long_desc.clone()),
+                input_schema: Some(json!({})),
+            },
+            Tool {
+                type_: None,
+                name: Some("small_tool".to_string()),
+                description: Some("short".to_string()),
+                input_schema: Some(json!({})),
+            },
+        ];
+        let (overrides, system_text) = process_long_tool_descriptions(&tools);
+
+        // Only the big_tool should have an override
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].0, "big_tool");
+        assert!(overrides[0].1.contains("See full documentation"));
+        assert!(overrides[0].1.contains("big_tool"));
+
+        // System text should contain the full tool documentation
+        assert!(system_text.contains("## Tool: big_tool"));
+        assert!(system_text.contains(&long_desc));
+    }
+
+    // ===== New tests: build_tool_specifications with sanitization =====
+
+    #[test]
+    fn test_build_tool_specs_sanitizes_schema() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![Tool {
+            type_: None,
+            name: Some("my_tool".to_string()),
+            description: Some("A tool".to_string()),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "arg": { "type": "string", "additionalProperties": false }
+                },
+                "additionalProperties": false,
+                "required": []
+            })),
+        }];
+        let no_overrides: Vec<(String, String)> = vec![];
+        let specs = build_tool_specifications(&tools, 10000, &no_overrides);
+        let schema = &specs[0]["toolSpecification"]["inputSchema"]["json"];
+
+        // additionalProperties should be removed at all levels
+        assert!(schema.get("additionalProperties").is_none());
+        assert!(schema["properties"]["arg"].get("additionalProperties").is_none());
+        // empty required should be removed
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_build_tool_specs_sanitizes_dollar_name() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![Tool {
+            type_: None,
+            name: Some("$bash".to_string()),
+            description: Some("Run bash".to_string()),
+            input_schema: Some(json!({})),
+        }];
+        let no_overrides: Vec<(String, String)> = vec![];
+        let specs = build_tool_specifications(&tools, 10000, &no_overrides);
+        let name = specs[0]["toolSpecification"]["name"].as_str().unwrap();
+        assert_eq!(name, "bash");
+    }
+
+    #[test]
+    fn test_build_tool_specs_applies_desc_overrides() {
+        use crate::proxy::mappers::claude::models::Tool;
+        let tools = vec![Tool {
+            type_: None,
+            name: Some("my_tool".to_string()),
+            description: Some("Original very long description".to_string()),
+            input_schema: Some(json!({})),
+        }];
+        let overrides = vec![
+            ("my_tool".to_string(), "Short reference".to_string()),
+        ];
+        let specs = build_tool_specifications(&tools, 10000, &overrides);
+        let desc = specs[0]["toolSpecification"]["description"].as_str().unwrap();
+        assert_eq!(desc, "Short reference");
     }
 }
