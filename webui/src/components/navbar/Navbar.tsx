@@ -19,7 +19,7 @@ function Navbar() {
     // 创建导航项(包含翻译后的标签)
     const navItems: NavItem[] = [
         { path: '/', label: t('nav.dashboard'), icon: LayoutDashboard, priority: 'high' },
-        { path: '/accounts', label: t('nav.accounts'), icon: Users, priority: 'high' },
+
         { path: '/api-proxy', label: t('nav.proxy'), icon: Network, priority: 'high' },
         { path: '/monitor', label: t('nav.call_records'), icon: Activity, priority: 'medium' },
         { path: '/token-stats', label: t('nav.token_stats', 'Token 统计'), icon: BarChart3, priority: 'low' },
