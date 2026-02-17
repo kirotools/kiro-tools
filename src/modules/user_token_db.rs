@@ -333,6 +333,28 @@ pub fn list_tokens() -> Result<Vec<UserToken>, String> {
     Ok(tokens)
 }
 
+/// 获取今日请求次数（按 UTC 自然日）
+pub fn get_today_request_count() -> Result<i64, String> {
+    let conn = connect_db()?;
+    let now = Utc::now();
+    let start_of_day = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "Failed to build start-of-day timestamp".to_string())?
+        .and_utc()
+        .timestamp();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM token_usage_logs WHERE request_time >= ?1",
+            params![start_of_day],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to query today's requests: {}", e))?;
+
+    Ok(count)
+}
+
 /// 获取单个令牌信息
 pub fn get_token_by_id(id: &str) -> Result<Option<UserToken>, String> {
     let conn = connect_db()?;
