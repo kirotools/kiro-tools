@@ -49,7 +49,7 @@ impl UserInfo {
 
 static AUTH_MANAGERS: OnceLock<Arc<Mutex<HashMap<String, Arc<KiroAuthManager>>>>> = OnceLock::new();
 
-fn get_auth_managers() -> &'static Arc<Mutex<HashMap<String, Arc<KiroAuthManager>>>> {
+pub fn get_auth_managers() -> &'static Arc<Mutex<HashMap<String, Arc<KiroAuthManager>>>> {
     AUTH_MANAGERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 

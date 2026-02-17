@@ -142,6 +142,12 @@ struct AccountResponse {
     quota: Option<QuotaResponse>,
     last_used: i64,
     concurrency: Option<ConcurrencyResponse>,
+    /// Authentication source: "token" | "creds_file" | "aws_sso"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_source: Option<String>,
+    /// Detected auth type: "KiroDesktop" | "AwsSsoOidc"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_type: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -219,6 +225,8 @@ fn to_account_response(
             current: concurrency_info.current_concurrency,
             available: concurrency_info.available_slots,
         }),
+        auth_source: account.auth_source.clone(),
+        auth_type: account.auth_type.clone(),
     }
 }
 
@@ -493,6 +501,7 @@ impl AxumServer {
             .route("/accounts/bulk-delete", post(admin_delete_accounts))
             .route("/accounts/reorder", post(admin_reorder_accounts))
             .route("/accounts/export", post(admin_export_accounts))
+            .route("/accounts/import", post(admin_import_accounts))
             .route("/accounts/:accountId/toggle-proxy", post(admin_toggle_proxy_status))
             .route("/accounts/:accountId/quota", get(admin_fetch_account_quota))
             // System
@@ -696,6 +705,133 @@ async fn admin_export_accounts(
     Ok(Json(response))
 }
 
+/// Bulk import accounts from exported data.
+/// Supports three auth sources: token, creds_file, and aws_sso.
+/// For creds_file/aws_sso accounts, if `creds_data` is provided, it is written
+/// to a temporary file and used as the credential source.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ImportAccountItem {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, alias = "refreshToken", alias = "refresh_token")]
+    refresh_token: Option<String>,
+    #[serde(default, alias = "authSource", alias = "auth_source")]
+    auth_source: Option<String>,
+    #[serde(default, alias = "authType", alias = "auth_type")]
+    auth_type: Option<String>,
+    /// Embedded credential file content for creds_file/aws_sso accounts
+    #[serde(default, alias = "credsData", alias = "creds_data")]
+    creds_data: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ImportAccountsRequest {
+    accounts: Vec<ImportAccountItem>,
+}
+
+#[derive(Serialize)]
+struct ImportAccountsResponse {
+    total: usize,
+    success: usize,
+    failed: usize,
+    details: Vec<ImportResultDetail>,
+}
+
+#[derive(Serialize)]
+struct ImportResultDetail {
+    email: Option<String>,
+    success: bool,
+    error: Option<String>,
+}
+
+async fn admin_import_accounts(
+    State(state): State<AppState>,
+    Json(payload): Json<ImportAccountsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let total = payload.accounts.len();
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    let mut details = Vec::new();
+
+    for item in &payload.accounts {
+        let result = import_single_account(&state, item).await;
+        match result {
+            Ok(email) => {
+                success += 1;
+                details.push(ImportResultDetail { email: Some(email), success: true, error: None });
+            }
+            Err(e) => {
+                failed += 1;
+                details.push(ImportResultDetail { email: item.email.clone(), success: false, error: Some(e) });
+            }
+        }
+    }
+
+    // Reload accounts in token manager after bulk import
+    if success > 0 {
+        if let Err(e) = state.token_manager.load_accounts().await {
+            logger::log_error(&format!("[API] Failed to reload accounts after import: {}", e));
+        }
+    }
+
+    Ok(Json(ImportAccountsResponse { total, success, failed, details }))
+}
+
+/// Import a single account from export data.
+/// Handles three scenarios:
+/// 1. `creds_data` present → write to temp file, add via credsFile
+/// 2. Only `refresh_token` → add via refreshToken
+/// 3. Neither → error
+async fn import_single_account(
+    state: &AppState,
+    item: &ImportAccountItem,
+) -> Result<String, String> {
+    let auth_source = item.auth_source.as_deref();
+
+    // If creds_data is embedded, write to a temp file and use as creds_file
+    if let Some(ref creds_data) = item.creds_data {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("kiro_import_{}.json", uuid::Uuid::new_v4()));
+        let content = serde_json::to_string_pretty(creds_data)
+            .map_err(|e| format!("Failed to serialize creds_data: {}", e))?;
+        std::fs::write(&temp_file, &content)
+            .map_err(|e| format!("Failed to write temp creds file: {}", e))?;
+        
+        let creds_path = temp_file.to_string_lossy().to_string();
+        let result = state.account_service
+            .add_account(
+                None,
+                Some(&creds_path),
+                None,
+                auth_source,
+            )
+            .await;
+
+        // Clean up the temp file (best effort)
+        let _ = std::fs::remove_file(&temp_file);
+
+        return result.map(|acc| acc.email);
+    }
+
+    // Fallback: use refresh_token directly
+    if let Some(ref token) = item.refresh_token {
+        if token.trim().len() > 20 {
+            return state.account_service
+                .add_account(
+                    Some(token.trim()),
+                    None,
+                    None,
+                    Some("token"),
+                )
+                .await
+                .map(|acc| acc.email);
+        }
+    }
+
+    Err("No valid credential data: need either creds_data or refresh_token".to_string())
+}
+
 async fn admin_get_current_account(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
@@ -719,11 +855,16 @@ async fn admin_get_current_account(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AddAccountRequest {
+    #[serde(default, alias = "refreshToken", alias = "refresh_token")]
     refresh_token: Option<String>,
+    #[serde(default, alias = "credsFile", alias = "creds_file")]
     creds_file: Option<String>,
+    #[serde(default, alias = "sqliteDb", alias = "sqlite_db")]
     sqlite_db: Option<String>,
+    /// Frontend-specified auth source hint: "token" | "creds_file" | "aws_sso"
+    #[serde(default, alias = "authSource", alias = "auth_source")]
+    auth_source: Option<String>,
 }
 
 async fn admin_add_account(
@@ -736,6 +877,7 @@ async fn admin_add_account(
             payload.refresh_token.as_deref(),
             payload.creds_file.as_deref(),
             payload.sqlite_db.as_deref(),
+            payload.auth_source.as_deref(),
         )
         .await
         .map_err(|e| {

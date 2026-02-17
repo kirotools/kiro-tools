@@ -23,6 +23,8 @@ Thumbs.db
 # Credentials
 kiro-auth-token.json
 kiro-tools.log
+kiro-tools.log.*
+kiro-tools.pid
 
 # Claude Code
 .claude/

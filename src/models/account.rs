@@ -57,6 +57,12 @@ pub struct Account {
     /// Whether to sync refreshed tokens back to the source credentials file
     #[serde(default)]
     pub sync_back: bool,
+    /// Authentication source: "token", "creds_file", "aws_sso"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_source: Option<String>,
+    /// Detected auth type from KiroAuthManager: "KiroDesktop" or "AwsSsoOidc"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
 }
 
 impl Account {
@@ -86,6 +92,8 @@ impl Account {
             creds_file: None,
             sqlite_db: None,
             sync_back: false,
+            auth_source: None,
+            auth_type: None,
         }
     }
 
@@ -163,10 +171,24 @@ impl Default for AccountIndex {
 }
 
 /// 导出账号项（用于备份/迁移）
+///
+/// 支持三种来源的账号导出：
+/// - token: 仅包含 email + refresh_token
+/// - creds_file: 包含 email + refresh_token + 嵌入的凭证文件内容
+/// - aws_sso: 包含 email + refresh_token + 嵌入的 AWS SSO 凭证内容
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountExportItem {
     pub email: String,
     pub refresh_token: String,
+    /// 认证来源: "token" | "creds_file" | "aws_sso"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_source: Option<String>,
+    /// 检测到的认证类型: "KiroDesktop" | "AwsSsoOidc"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
+    /// 嵌入的凭证文件内容（用于 creds_file/aws_sso 来源的完整还原）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creds_data: Option<serde_json::Value>,
 }
 
 /// 导出账号响应

@@ -1,8 +1,92 @@
 use crate::models::{Account, TokenData};
 use crate::modules;
+use serde_json::Value;
 
 fn is_http_unauthorized_error(err: &str) -> bool {
     err.contains("HTTP 401")
+}
+
+fn extract_refresh_token_from_json(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(token) = map
+                .get("refresh_token")
+                .or_else(|| map.get("refreshToken"))
+                .and_then(|v| v.as_str())
+            {
+                let token = token.trim();
+                if token.len() > 20 {
+                    return Some(token.to_string());
+                }
+            }
+
+            if let Some(accounts) = map.get("accounts").and_then(|v| v.as_array()) {
+                for item in accounts {
+                    if let Some(token) = extract_refresh_token_from_json(item) {
+                        return Some(token);
+                    }
+                }
+            }
+
+            None
+        }
+        Value::Array(arr) => {
+            // Tuple style: [email, refresh_token]
+            if arr.len() >= 2 {
+                if let (Some(_email), Some(token)) = (arr[0].as_str(), arr[1].as_str()) {
+                    let token = token.trim();
+                    if token.len() > 20 {
+                        return Some(token.to_string());
+                    }
+                }
+            }
+
+            for item in arr {
+                if let Some(token) = extract_refresh_token_from_json(item) {
+                    return Some(token);
+                }
+            }
+
+            None
+        }
+        Value::String(s) => {
+            let token = s.trim();
+            if token.len() > 20 {
+                Some(token.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_refresh_token_input(refresh_token: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = refresh_token else {
+        return Ok(None);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || (trimmed.starts_with('"') && trimmed.ends_with('"')) {
+        if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(token) = extract_refresh_token_from_json(&json) {
+                return Ok(Some(token));
+            }
+
+            return Err("Invalid refresh_token JSON input: no refresh_token/refreshToken found".to_string());
+        }
+    }
+
+    // Fallback: treat as plain token string
+    if trimmed.len() > 20 {
+        return Ok(Some(trimmed.to_string()));
+    }
+
+    Err("Invalid refresh_token input: token is too short".to_string())
 }
 
 /// 账号服务层 - 彻底解除对 Tauri 运行时的依赖
@@ -21,33 +105,72 @@ impl AccountService {
     /// - `refresh_token`: Direct refresh token string (Kiro Desktop auth)
     /// - `creds_file`: Path to JSON credentials file (Kiro IDE or kiro-cli)
     /// - `sqlite_db`: Path to kiro-cli SQLite database
+    ///
+    /// `auth_source_hint` allows frontend/caller to specify the source type ("token", "creds_file", "aws_sso").
+    /// If not specified, it is inferred from which parameter is provided.
     pub async fn add_account(
         &self,
         refresh_token: Option<&str>,
         creds_file: Option<&str>,
         sqlite_db: Option<&str>,
+        auth_source_hint: Option<&str>,
     ) -> Result<Account, String> {
-        if refresh_token.is_none() && creds_file.is_none() && sqlite_db.is_none() {
+        let normalized_refresh_token = normalize_refresh_token_input(refresh_token)?;
+
+        if normalized_refresh_token.is_none() && creds_file.is_none() && sqlite_db.is_none() {
             return Err("Either refreshToken, credsFile, or sqliteDb must be provided".to_string());
         }
+
+        // Determine auth_source: explicit hint > inferred from parameters
+        let auth_source = auth_source_hint.map(String::from).or_else(|| {
+            if sqlite_db.is_some() {
+                Some("sqlite_db".to_string())
+            } else if creds_file.is_some() {
+                // Detect aws_sso vs creds_file by checking file content for clientId/clientSecret
+                if let Some(path) = creds_file {
+                    let expanded = shellexpand::tilde(path).to_string();
+                    if let Ok(content) = std::fs::read_to_string(&expanded) {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if data.get("clientId").is_some() || data.get("client_id").is_some() {
+                                return Some("aws_sso".to_string());
+                            }
+                        }
+                    }
+                }
+                Some("creds_file".to_string())
+            } else {
+                Some("token".to_string())
+            }
+        });
 
         // [FIX #1583] 生成临时 UUID 作为账号上下文，避免传递 None 导致代理选择异常
         let temp_account_id = uuid::Uuid::new_v4().to_string();
 
         // 1. 获取 Token (使用临时 ID 确保代理选择有明确上下文)
         let token_res = modules::oauth::refresh_access_token_with_source(
-            refresh_token,
+            normalized_refresh_token.as_deref(),
             creds_file,
             sqlite_db,
             Some(&temp_account_id),
         )
         .await?;
 
+        // Detect auth_type from the KiroAuthManager
+        let auth_type_str = {
+            let managers = modules::oauth::get_auth_managers().lock().await;
+            managers.get(&temp_account_id).map(|mgr| {
+                // Use try_lock to avoid async in sync context
+                mgr.auth_type_sync()
+                    .map(|at| format!("{:?}", at))
+                    .unwrap_or_default()
+            })
+        };
+
         let user_info = match modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await {
             Ok(info) => info,
             Err(e) if is_http_unauthorized_error(&e) => {
                 let retry_token_res = modules::oauth::refresh_access_token_with_source(
-                    refresh_token,
+                    normalized_refresh_token.as_deref(),
                     creds_file,
                     sqlite_db,
                     Some(&temp_account_id),
@@ -62,7 +185,7 @@ impl AccountService {
         let project_id = Some("kiro-native".to_string());
 
         let persist_refresh_token = token_res.refresh_token.clone()
-            .or_else(|| refresh_token.map(String::from))
+            .or_else(|| normalized_refresh_token.clone())
             .unwrap_or_default();
 
         let token = TokenData::new(
@@ -82,6 +205,8 @@ impl AccountService {
                 token,
                 creds_file.map(str::to_string),
                 sqlite_db.map(str::to_string),
+                auth_source,
+                auth_type_str,
             )?;
 
         // [FIX] Re-register AUTH_MANAGER under the real account ID (remove temp UUID entry).
@@ -150,7 +275,8 @@ impl AccountService {
 
 #[cfg(test)]
 mod tests {
-    use super::is_http_unauthorized_error;
+    use super::{extract_refresh_token_from_json, is_http_unauthorized_error, normalize_refresh_token_input};
+    use serde_json::json;
 
     #[test]
     fn detects_401_error_text() {
@@ -162,5 +288,33 @@ mod tests {
     fn ignores_non_401_error_text() {
         let err = "Failed to fetch user info: HTTP 403 - forbidden";
         assert!(!is_http_unauthorized_error(err));
+    }
+
+    #[test]
+    fn parses_plain_refresh_token() {
+        let token = "1//abcdefghijklmnopqrstuvwxyz123456";
+        let parsed = normalize_refresh_token_input(Some(token)).unwrap();
+        assert_eq!(parsed.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn parses_wrapped_accounts_json() {
+        let input = r#"{"accounts":[{"email":"a@b.com","refresh_token":"1//token_12345678901234567890"}]}"#;
+        let parsed = normalize_refresh_token_input(Some(input)).unwrap();
+        assert_eq!(parsed.as_deref(), Some("1//token_12345678901234567890"));
+    }
+
+    #[test]
+    fn parses_tuple_array_json() {
+        let input = r#"[["a@b.com","1//tuple_token_12345678901234567890"]]"#;
+        let parsed = normalize_refresh_token_input(Some(input)).unwrap();
+        assert_eq!(parsed.as_deref(), Some("1//tuple_token_12345678901234567890"));
+    }
+
+    #[test]
+    fn extracts_camel_case_token() {
+        let v = json!({"refreshToken":"1//camel_case_token_12345678901234567890"});
+        let extracted = extract_refresh_token_from_json(&v);
+        assert_eq!(extracted.as_deref(), Some("1//camel_case_token_12345678901234567890"));
     }
 }

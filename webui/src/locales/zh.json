@@ -126,7 +126,7 @@
     "import_success": "成功导入 {{count}} 个账号",
     "import_partial": "导入完成: {{success}} 个成功, {{fail}} 个失败",
     "import_fail": "导入失败: {{error}}",
-    "import_invalid_format": "无效的 JSON 格式，请确保文件包含 email 和 refresh_token 字段",
+    "import_invalid_format": "无效的导入格式。支持：对象/数组中的 refresh_token 或 refreshToken、{accounts:[...]} 包装格式，以及 [email, refresh_token] 元组数组。",
     "delete_selected": "删除 ({{count}})",
     "current": "当前",
     "current_badge": "当前",
@@ -232,11 +232,11 @@
         "label": "添加方式",
         "token": "Refresh Token",
         "creds_file": "凭证文件",
-        "sqlite_db": "SQLite 数据库"
+        "aws_sso_file": "AWS SSO 凭证文件"
       },
       "token": {
         "label": "Refresh Token",
-        "placeholder": "在此处粘贴您的 Refresh Token (支持批量)\n\n支持格式:\n1. 单个 Token (1//...)\n2. JSON 数组 (含 refresh_token 字段)\n3. 任意包含 Token 的文本 (自动提取)",
+        "placeholder": "在此处粘贴您的 Refresh Token (支持批量)\n\n支持格式:\n1. 单个 Token 字符串\n2. JSON 对象/数组 (含 refresh_token 或 refreshToken)\n3. 包装对象 {accounts:[...]}\n4. 元组数组 [[email, refresh_token], ...]",
         "hint": "提示: 支持一次性粘贴多个 Token 或 JSON 数组，系统将自动识别并批量导入。",
         "error_token": "请填写 Refresh Token",
         "batch_progress": "正在导入第 {{current}}/{{total}} 个账户...",
@@ -245,16 +245,16 @@
         "batch_fail": "导入失败"
       },
       "creds_file": {
-        "label": "凭证文件路径",
-        "hint": "支持 Kiro IDE 和 AWS SSO 凭证文件",
+        "label": "JSON 凭据文件路径",
+        "hint": "适用于 Kiro IDE（标准）和 Enterprise 账号登录",
         "supported": "支持的文件",
         "error_path": "请填写凭证文件路径"
       },
-      "sqlite_db": {
-        "label": "数据库文件路径",
-        "hint": "支持 kiro-cli 和 amazon-q 数据库",
-        "supported": "支持的数据库",
-        "error_path": "请填写数据库文件路径"
+      "aws_sso_file": {
+        "label": "AWS SSO 凭证文件路径",
+        "hint": "适用于 Builder ID 与 Enterprise SSO 账号",
+        "supported": "支持的文件",
+        "error_path": "请填写 AWS SSO 凭证文件路径"
       },
       "success": "添加成功",
       "import": {
@@ -976,8 +976,8 @@
     "error_invalid_key": "密码或 API Key 错误，请重试",
     "error_network": "网络连接失败，请检查服务是否正常运行",
     "note": "注意：如果设置了独立的管理密码，请输入管理密码；否则请输入 API_KEY。",
-    "lookup_hint": "如果您忘记了，请运行 docker logs kiro-tools 寻找 Current API Key 或 Web UI Password",
-    "config_hint": "或执行 grep -E '\"api_key\"|\"admin_password\"' ~/.kiro_tools/gui_config.json 查看。"
+    "lookup_hint": "如果您忘记了：Docker 请运行 docker logs kiro-tools；Deb/Systemd 请运行 journalctl -u kiro-tools -n 200 | grep -E 'Current API Key|Web UI Password'。",
+    "config_hint": "配置文件路径通常为 ~/.kiro_tools/gui_config.json（手动运行）或 /var/lib/kiro-tools/gui_config.json（Deb 服务）。可执行 grep -E '\"api_key\"|\"admin_password\"' /var/lib/kiro-tools/gui_config.json 查看。"
   },
   "token_stats": {
     "title": "Token 消费统计",

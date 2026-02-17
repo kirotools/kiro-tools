@@ -18,6 +18,8 @@ export interface Account {
     validation_blocked_until?: number;
     validation_blocked_reason?: string;
     concurrency?: ConcurrencyData;
+    auth_source?: string;  // "token" | "creds_file" | "aws_sso"
+    auth_type?: string;    // "KiroDesktop" | "AwsSsoOidc"
 }
 
 export interface TokenData {

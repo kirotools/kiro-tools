@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, Loader2, CheckCircle2, XCircle, Key, FileJson, Database, ChevronDown } from 'lucide-react';
+import { Plus, Loader2, CheckCircle2, XCircle, Key, FileJson, ChevronDown } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AddAccountParams } from '../../services/accountService';
 
@@ -9,7 +9,7 @@ interface AddAccountDialogProps {
     showText?: boolean;
 }
 
-type AddMethod = 'token' | 'credsFile' | 'sqliteDb';
+type AddMethod = 'token' | 'credsFile' | 'awsSsoFile';
 type Status = 'idle' | 'loading' | 'success' | 'error';
 
 function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
@@ -20,7 +20,7 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
     // Form values
     const [refreshToken, setRefreshToken] = useState('');
     const [credsFile, setCredsFile] = useState('');
-    const [sqliteDb, setSqliteDb] = useState('');
+    const [awsSsoFile, setAwsSsoFile] = useState('');
 
     // UI State
     const [status, setStatus] = useState<Status>('idle');
@@ -38,7 +38,7 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
         setMessage('');
         setRefreshToken('');
         setCredsFile('');
-        setSqliteDb('');
+        setAwsSsoFile('');
         setMethod('token');
     };
 
@@ -125,13 +125,13 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
                 if (!credsFile.trim()) {
                     throw new Error(t('accounts.add.creds_file.error_path'));
                 }
-                params = { credsFile: credsFile.trim() };
+                params = { credsFile: credsFile.trim(), authSource: 'creds_file' };
 
-            } else if (method === 'sqliteDb') {
-                if (!sqliteDb.trim()) {
-                    throw new Error(t('accounts.add.sqlite_db.error_path'));
+            } else if (method === 'awsSsoFile') {
+                if (!awsSsoFile.trim()) {
+                    throw new Error(t('accounts.add.aws_sso_file.error_path'));
                 }
-                params = { sqliteDb: sqliteDb.trim() };
+                params = { credsFile: awsSsoFile.trim(), authSource: 'aws_sso' };
             }
 
             // Single add for file/db methods
@@ -152,7 +152,7 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
     const methodOptions: { value: AddMethod; label: string; icon: React.ReactNode }[] = [
         { value: 'token', label: t('accounts.add.method.token'), icon: <Key className="w-4 h-4" /> },
         { value: 'credsFile', label: t('accounts.add.method.creds_file'), icon: <FileJson className="w-4 h-4" /> },
-        { value: 'sqliteDb', label: t('accounts.add.method.sqlite_db'), icon: <Database className="w-4 h-4" /> },
+        { value: 'awsSsoFile', label: t('accounts.add.method.aws_sso_file'), icon: <FileJson className="w-4 h-4" /> },
     ];
 
     const StatusAlert = () => {
@@ -268,38 +268,38 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
                                             <p className="font-medium mb-1">{t('accounts.add.creds_file.supported')}:</p>
                                             <ul className="list-disc list-inside space-y-0.5">
                                                 <li>Kiro IDE: ~/.aws/sso/cache/kiro-auth-token.json</li>
-                                                <li>AWS SSO: ~/.aws/sso/cache/*.json</li>
+                                                <li>Enterprise: ~/.aws/sso/cache/kiro-auth-token.json</li>
                                             </ul>
                                         </div>
                                     </div>
                                 </div>
                             )}
 
-                            {method === 'sqliteDb' && (
+                            {method === 'awsSsoFile' && (
                                 <div className="space-y-4 py-2">
                                     <div className="bg-gray-50 dark:bg-base-200 p-4 rounded-lg border border-gray-200 dark:border-base-300">
                                         <div className="flex justify-between items-center mb-2">
                                             <span className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                                                <Database className="w-4 h-4 inline mr-1" />
-                                                {t('accounts.add.sqlite_db.label')}
+                                                <FileJson className="w-4 h-4 inline mr-1" />
+                                                {t('accounts.add.aws_sso_file.label')}
                                             </span>
                                         </div>
                                         <input
                                             type="text"
                                             className="input input-bordered w-full font-mono text-sm focus:outline-none focus:border-blue-500 transition-colors bg-white dark:bg-base-100 text-gray-900 dark:text-base-content border-gray-300 dark:border-base-300"
-                                            placeholder="~/.local/share/kiro-cli/data.sqlite3"
-                                            value={sqliteDb}
-                                            onChange={(e) => setSqliteDb(e.target.value)}
+                                            placeholder="~/.aws/sso/cache/your-sso-cache-file.json"
+                                            value={awsSsoFile}
+                                            onChange={(e) => setAwsSsoFile(e.target.value)}
                                             disabled={status === 'loading' || status === 'success'}
                                         />
                                         <p className="text-[10px] text-gray-400 mt-2">
-                                            {t('accounts.add.sqlite_db.hint')}
+                                            {t('accounts.add.aws_sso_file.hint')}
                                         </p>
                                         <div className="mt-3 text-[10px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-base-300 p-2 rounded">
-                                            <p className="font-medium mb-1">{t('accounts.add.sqlite_db.supported')}:</p>
+                                            <p className="font-medium mb-1">{t('accounts.add.aws_sso_file.supported')}:</p>
                                             <ul className="list-disc list-inside space-y-0.5">
-                                                <li>kiro-cli: ~/.local/share/kiro-cli/data.sqlite3</li>
-                                                <li>amazon-q: ~/.local/share/amazon-q/data.sqlite3</li>
+                                                <li>AWS SSO: ~/.aws/sso/cache/your-sso-cache-file.json</li>
+                                                <li>Enterprise SSO: ~/.aws/sso/cache/*.json</li>
                                             </ul>
                                         </div>
                                     </div>

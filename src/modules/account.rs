@@ -853,7 +853,7 @@ pub fn add_account(
     name: Option<String>,
     token: TokenData,
 ) -> Result<Account, String> {
-    add_account_with_source(email, name, token, None, None)
+    add_account_with_source(email, name, token, None, None, None, None)
 }
 
 /// Copy credential source (creds_file or sqlite_db) into the app's own data directory.
@@ -985,6 +985,8 @@ pub fn add_account_with_source(
     token: TokenData,
     creds_file: Option<String>,
     sqlite_db: Option<String>,
+    auth_source: Option<String>,
+    auth_type_str: Option<String>,
 ) -> Result<Account, String> {
     let _lock = ACCOUNT_INDEX_LOCK
         .lock()
@@ -1017,6 +1019,10 @@ pub fn add_account_with_source(
         }
     }
 
+    // Store auth source and type metadata
+    account.auth_source = auth_source;
+    account.auth_type = auth_type_str;
+
     // Save account data
     save_account(&account)?;
 
@@ -1047,7 +1053,7 @@ pub fn upsert_account(
     name: Option<String>,
     token: TokenData,
 ) -> Result<Account, String> {
-    upsert_account_with_source(email, name, token, None, None)
+    upsert_account_with_source(email, name, token, None, None, None, None)
 }
 
 pub fn upsert_account_with_source(
@@ -1056,6 +1062,8 @@ pub fn upsert_account_with_source(
     token: TokenData,
     creds_file: Option<String>,
     sqlite_db: Option<String>,
+    auth_source: Option<String>,
+    auth_type_str: Option<String>,
 ) -> Result<Account, String> {
     let _lock = ACCOUNT_INDEX_LOCK
         .lock()
@@ -1094,6 +1102,14 @@ pub fn upsert_account_with_source(
                             ));
                         }
                     }
+                }
+
+                // Store auth source and type metadata
+                if auth_source.is_some() {
+                    account.auth_source = auth_source.clone();
+                }
+                if auth_type_str.is_some() {
+                    account.auth_type = auth_type_str.clone();
                 }
 
                 if account.disabled
@@ -1136,6 +1152,10 @@ pub fn upsert_account_with_source(
                     }
                 }
 
+                // Store auth source and type metadata
+                account.auth_source = auth_source.clone();
+                account.auth_type = auth_type_str.clone();
+
                 save_account(&account)?;
 
                 if let Some(idx_summary) = index.accounts.iter_mut().find(|s| s.id == account_id) {
@@ -1154,7 +1174,7 @@ pub fn upsert_account_with_source(
 
     // Release lock, let add_account handle it
     drop(_lock);
-    add_account_with_source(email, name, token, creds_file, sqlite_db)
+    add_account_with_source(email, name, token, creds_file, sqlite_db, auth_source, auth_type_str)
 }
 
 /// Delete account
@@ -1406,6 +1426,7 @@ pub fn toggle_proxy_status(
 }
 
 /// Export accounts by IDs (for backup/migration)
+/// Includes auth_source and embedded credential data for file-based accounts.
 pub fn export_accounts_by_ids(account_ids: &[String]) -> Result<crate::models::AccountExportResponse, String> {
     use crate::models::{AccountExportItem, AccountExportResponse};
     
@@ -1414,9 +1435,44 @@ pub fn export_accounts_by_ids(account_ids: &[String]) -> Result<crate::models::A
     let export_items: Vec<AccountExportItem> = accounts
         .into_iter()
         .filter(|acc| account_ids.contains(&acc.id))
-        .map(|acc| AccountExportItem {
-            email: acc.email,
-            refresh_token: acc.token.refresh_token.clone(),
+        .map(|acc| {
+            let mut item = AccountExportItem {
+                email: acc.email.clone(),
+                refresh_token: acc.token.refresh_token.clone(),
+                auth_source: acc.auth_source.clone(),
+                auth_type: acc.auth_type.clone(),
+                creds_data: None,
+            };
+
+            // For file-based accounts, embed the creds file content
+            if let Some(ref creds_path) = acc.creds_file {
+                let expanded = shellexpand::tilde(creds_path).to_string();
+                if let Ok(content) = std::fs::read_to_string(&expanded) {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                        item.creds_data = Some(data);
+                    }
+                }
+            }
+
+            // Infer auth_source if not set (backward compat with old accounts)
+            if item.auth_source.is_none() {
+                if acc.creds_file.is_some() {
+                    // Check embedded creds for clientId to distinguish aws_sso from creds_file
+                    if let Some(ref data) = item.creds_data {
+                        if data.get("clientId").is_some() || data.get("client_id").is_some() {
+                            item.auth_source = Some("aws_sso".to_string());
+                        } else {
+                            item.auth_source = Some("creds_file".to_string());
+                        }
+                    } else {
+                        item.auth_source = Some("creds_file".to_string());
+                    }
+                } else {
+                    item.auth_source = Some("token".to_string());
+                }
+            }
+
+            item
         })
         .collect();
 

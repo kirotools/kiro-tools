@@ -86,6 +86,27 @@ journalctl -u kiro-tools -f
 
 安装后二进制位于 `/usr/bin/kiro-tools`，前端文件位于 `/usr/share/kiro-tools/dist`，数据目录位于 `/var/lib/kiro-tools`。
 
+### Deb 安装后忘记 API Key / Web UI 密码
+
+Deb 安装通常以 `kiro-tools` 系统服务运行，配置文件不在当前登录用户的 `~/.kiro_tools` 下，而在：
+
+```bash
+sudo grep -E '"api_key"|"admin_password"' /var/lib/kiro-tools/gui_config.json
+```
+
+也可以从服务日志中查看启动时输出：
+
+```bash
+sudo journalctl -u kiro-tools -n 200 | grep -E 'Current API Key|Web UI Password|API Key:'
+```
+
+如需确认服务实际使用的数据目录：
+
+```bash
+sudo systemctl cat kiro-tools | grep -E 'KIRO_DATA_DIR|EnvironmentFile'
+sudo cat /etc/kiro-tools/env
+```
+
 ## Docker
 
 ```bash

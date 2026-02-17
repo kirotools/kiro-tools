@@ -130,7 +130,7 @@
     "import_success": "Successfully imported {{count}} accounts",
     "import_partial": "Import completed: {{success}} succeeded, {{fail}} failed",
     "import_fail": "Import failed: {{error}}",
-    "import_invalid_format": "Invalid JSON format, please ensure the file contains email and refresh_token fields",
+    "import_invalid_format": "Invalid import format. Supported: refresh_token or refreshToken in object/array items, wrapped {accounts:[...]}, and tuple arrays like [email, refresh_token].",
     "delete_selected": "Delete ({{count}})",
     "current": "Current",
     "current_badge": "Current",
@@ -234,7 +234,7 @@
       },
       "token": {
         "label": "Refresh Token",
-        "placeholder": "Paste your Refresh Token here (Batch supported)\n\nSupported formats:\n1. Single Token (1//...)\n2. JSON Array (with refresh_token field)\n3. Any text containing tokens (Auto-extraction)",
+        "placeholder": "Paste your Refresh Token here (Batch supported)\n\nSupported formats:\n1. Single token string\n2. JSON object/array with refresh_token or refreshToken\n3. Wrapped object {accounts:[...]}\n4. Tuple array [[email, refresh_token], ...]",
         "hint": "Tip: You can paste multiple tokens or a JSON array to import in batch.",
         "error_token": "Please enter Refresh Token",
         "batch_progress": "Importing {{current}}/{{total}} accounts...",

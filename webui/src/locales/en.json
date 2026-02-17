@@ -129,7 +129,7 @@
     "import_success": "Successfully imported {{count}} accounts",
     "import_partial": "Import completed: {{success}} succeeded, {{fail}} failed",
     "import_fail": "Import failed: {{error}}",
-    "import_invalid_format": "Invalid JSON format, please ensure the file contains email and refresh_token fields",
+    "import_invalid_format": "Invalid import format. Supported: refresh_token or refreshToken in object/array items, wrapped {accounts:[...]}, and tuple arrays like [email, refresh_token].",
     "delete_selected": "Delete ({{count}})",
     "current": "Current",
     "current_badge": "Current",
@@ -235,11 +235,11 @@
         "label": "Add Method",
         "token": "Refresh Token",
         "creds_file": "Credentials File",
-        "sqlite_db": "SQLite Database"
+        "aws_sso_file": "AWS SSO Credentials File"
       },
       "token": {
         "label": "Refresh Token",
-        "placeholder": "Paste your Refresh Token here (Batch supported)\n\nSupported formats:\n1. Single Token (1//...)\n2. JSON Array (with refresh_token field)\n3. Any text containing tokens (Auto-extraction)",
+        "placeholder": "Paste your Refresh Token here (Batch supported)\n\nSupported formats:\n1. Single token string\n2. JSON object/array with refresh_token or refreshToken\n3. Wrapped object {accounts:[...]}\n4. Tuple array [[email, refresh_token], ...]",
         "hint": "Tip: You can paste multiple tokens or a JSON array to import in batch.",
         "error_token": "Please enter Refresh Token",
         "batch_progress": "Importing {{current}}/{{total}} accounts...",
@@ -248,16 +248,16 @@
         "batch_fail": "Import failed"
       },
       "creds_file": {
-        "label": "Credentials File Path",
-        "hint": "Supports Kiro IDE and AWS SSO credential files",
+        "label": "JSON Credentials File Path",
+        "hint": "For Kiro IDE (standard) and Enterprise account login",
         "supported": "Supported files",
         "error_path": "Please enter credentials file path"
       },
-      "sqlite_db": {
-        "label": "Database File Path",
-        "hint": "Supports kiro-cli and amazon-q databases",
-        "supported": "Supported databases",
-        "error_path": "Please enter database file path"
+      "aws_sso_file": {
+        "label": "AWS SSO Credentials File Path",
+        "hint": "For Builder ID and Enterprise SSO accounts",
+        "supported": "Supported files",
+        "error_path": "Please enter AWS SSO credentials file path"
       },
       "success": "Added successfully",
       "import": {
@@ -1013,8 +1013,8 @@
     "error_invalid_key": "Invalid password or API Key, please try again",
     "error_network": "Network connection failed, please check if the service is running",
     "note": "Note: If a separate management password is set, please enter it; otherwise, enter API_KEY.",
-    "lookup_hint": "If forgotten, run docker logs kiro-tools to find Current API Key or Web UI Password",
-    "config_hint": "Or run grep -E '\"api_key\"|\"admin_password\"' ~/.kiro_tools/gui_config.json to view."
+    "lookup_hint": "If forgotten: for Docker, run docker logs kiro-tools; for Deb/Systemd, run journalctl -u kiro-tools -n 200 | grep -E 'Current API Key|Web UI Password'.",
+    "config_hint": "Config file is usually ~/.kiro_tools/gui_config.json (manual run) or /var/lib/kiro-tools/gui_config.json (Deb service). You can run grep -E '\"api_key\"|\"admin_password\"' /var/lib/kiro-tools/gui_config.json."
   },
   "token_stats": {
     "title": "Token Consumption Stats",

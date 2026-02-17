@@ -21,7 +21,7 @@ import AddAccountDialog from "../components/accounts/AddAccountDialog";
 import ModalDialog from "../components/common/ModalDialog";
 import Pagination from "../components/common/Pagination";
 import { showToast } from "../components/common/ToastContainer";
-import { exportAccounts, type AddAccountParams } from "../services/accountService";
+import { exportAccounts, importAccounts, type AddAccountParams, type ImportAccountItem } from "../services/accountService";
 import { useAccountStore } from "../stores/useAccountStore";
 import { useConfigStore } from "../stores/useConfigStore";
 import { Account } from "../types/account";
@@ -529,7 +529,7 @@ function Dashboard() {
         return;
       }
 
-      const exportData = response.accounts;
+      const exportData = response;
       const content = JSON.stringify(exportData, null, 2);
       const fileName = `kiro_accounts_${
         new Date().toISOString().split("T")[0]
@@ -571,64 +571,152 @@ function Dashboard() {
   };
 
   const processImportData = async (content: string) => {
-    let importData: Array<{ email?: string; refresh_token?: string }>;
+    type ImportEntry = {
+      email?: string;
+      refresh_token?: string;
+      refreshToken?: string;
+      auth_source?: string;
+      authSource?: string;
+      auth_type?: string;
+      authType?: string;
+      creds_data?: any;
+      credsData?: any;
+    };
+
+    let parsed: unknown;
     try {
-      importData = JSON.parse(content);
+      parsed = JSON.parse(content);
     } catch {
       showToast(t("accounts.import_invalid_format"), "error");
       return;
     }
 
-    if (!Array.isArray(importData) || importData.length === 0) {
-      showToast(t("accounts.import_invalid_format"), "error");
-      return;
-    }
+    // Convert parsed data into ImportAccountItem[] for the bulk import endpoint
+    const toImportItem = (entry: ImportEntry): ImportAccountItem | null => {
+      const token = entry.refresh_token ?? entry.refreshToken;
+      const credsData = entry.creds_data ?? entry.credsData;
+      const authSource = entry.auth_source ?? entry.authSource;
+      const authType = entry.auth_type ?? entry.authType;
 
-    const validEntries = importData.filter(
-      (item) =>
-        item.refresh_token &&
-        typeof item.refresh_token === "string" &&
-        item.refresh_token.startsWith("1//")
-    );
-
-    if (validEntries.length === 0) {
-      showToast(t("accounts.import_invalid_format"), "error");
-      return;
-    }
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const entry of validEntries) {
-      try {
-        await addAccount({ refreshToken: entry.refresh_token! });
-        successCount++;
-      } catch (error) {
-        console.error("Import account failed:", error);
-        failCount++;
+      // Rich format: has creds_data (file-based account)
+      if (credsData) {
+        return {
+          email: entry.email,
+          refresh_token: typeof token === "string" ? token.trim() : undefined,
+          auth_source: authSource,
+          auth_type: authType,
+          creds_data: credsData,
+        };
       }
-      await new Promise((r) => setTimeout(r, 100));
+
+      // Simple format: has refresh_token
+      if (typeof token === "string" && token.trim().length > 20) {
+        return {
+          email: entry.email,
+          refresh_token: token.trim(),
+          auth_source: authSource ?? "token",
+        };
+      }
+
+      return null;
+    };
+
+    const fromArrayItem = (item: unknown): ImportAccountItem | null => {
+      // Tuple style: [email, refresh_token]
+      if (Array.isArray(item) && item.length >= 2 && typeof item[1] === "string") {
+        const token = item[1].trim();
+        if (token.length > 20) {
+          return { email: typeof item[0] === "string" ? item[0] : undefined, refresh_token: token, auth_source: "token" };
+        }
+        return null;
+      }
+      // Object with fields
+      if (item && typeof item === "object") {
+        return toImportItem(item as ImportEntry);
+      }
+      return null;
+    };
+
+    let importItems: ImportAccountItem[] = [];
+
+    // Format C: wrapped object { accounts: [...] }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const wrapper = parsed as { accounts?: unknown };
+      if (Array.isArray(wrapper.accounts)) {
+        importItems = wrapper.accounts
+          .map(fromArrayItem)
+          .filter((item): item is ImportAccountItem => item !== null);
+      } else {
+        // Format B: single object { email, refresh_token }
+        const single = toImportItem(parsed as ImportEntry);
+        if (single) importItems = [single];
+      }
     }
 
-    if (failCount === 0) {
-      showToast(
-        t("accounts.import_success", { count: successCount }),
-        "success"
-      );
-    } else if (successCount > 0) {
-      showToast(
-        t("accounts.import_partial", {
-          success: successCount,
-          fail: failCount,
-        }),
-        "warning"
-      );
-    } else {
-      showToast(
-        t("accounts.import_fail", { error: "All accounts failed to import" }),
-        "error"
-      );
+    // Format A/D: top-level array
+    if (Array.isArray(parsed)) {
+      importItems = parsed
+        .map(fromArrayItem)
+        .filter((item): item is ImportAccountItem => item !== null);
     }
+
+    // Deduplicate by refresh_token (if present)
+    const seen = new Set<string>();
+    importItems = importItems.filter((item) => {
+      const key = item.refresh_token || JSON.stringify(item.creds_data) || Math.random().toString();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    if (importItems.length === 0) {
+      showToast(t("accounts.import_invalid_format"), "error");
+      return;
+    }
+
+    // Check if any items have rich data (creds_data) — use bulk import endpoint
+    const hasRichData = importItems.some((item) => item.creds_data);
+
+    if (hasRichData) {
+      // Use the new bulk import endpoint
+      try {
+        const result = await importAccounts(importItems);
+        if (result.failed === 0) {
+          showToast(t("accounts.import_success", { count: result.success }), "success");
+        } else if (result.success > 0) {
+          showToast(t("accounts.import_partial", { success: result.success, fail: result.failed }), "warning");
+        } else {
+          const firstError = result.details.find((d) => d.error)?.error || "Unknown error";
+          showToast(t("accounts.import_fail", { error: firstError }), "error");
+        }
+      } catch (error) {
+        showToast(`${t("common.error")}: ${error}`, "error");
+      }
+    } else {
+      // Legacy: add accounts one by one via refreshToken
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const item of importItems) {
+        try {
+          await addAccount({ refreshToken: item.refresh_token });
+          successCount++;
+        } catch (error) {
+          console.error("Import account failed:", error);
+          failCount++;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      if (failCount === 0) {
+        showToast(t("accounts.import_success", { count: successCount }), "success");
+      } else if (successCount > 0) {
+        showToast(t("accounts.import_partial", { success: successCount, fail: failCount }), "warning");
+      } else {
+        showToast(t("accounts.import_fail", { error: "All accounts failed to import" }), "error");
+      }
+    }
+
     fetchAccounts();
   };
 

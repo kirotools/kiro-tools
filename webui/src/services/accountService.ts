@@ -19,6 +19,7 @@ export interface AddAccountParams {
     refreshToken?: string;
     credsFile?: string;
     sqliteDb?: string;
+    authSource?: string;  // "token" | "creds_file" | "aws_sso"
 }
 
 export async function addAccount(params: AddAccountParams): Promise<Account> {
@@ -64,10 +65,13 @@ export async function reorderAccounts(accountIds: string[]): Promise<void> {
     return await invoke('reorder_accounts', { accountIds });
 }
 
-// 导出账号相关
+// 导出账号相关 (支持多来源账号)
 export interface ExportAccountItem {
     email: string;
     refresh_token: string;
+    auth_source?: string;   // "token" | "creds_file" | "aws_sso"
+    auth_type?: string;     // "KiroDesktop" | "AwsSsoOidc"
+    creds_data?: any;       // 嵌入的凭证文件内容
 }
 
 export interface ExportAccountsResponse {
@@ -76,6 +80,26 @@ export interface ExportAccountsResponse {
 
 export async function exportAccounts(accountIds: string[]): Promise<ExportAccountsResponse> {
     return await invoke('export_accounts', { accountIds });
+}
+
+// 导入账号相关
+export interface ImportAccountItem {
+    email?: string;
+    refresh_token?: string;
+    auth_source?: string;
+    auth_type?: string;
+    creds_data?: any;
+}
+
+export interface ImportAccountsResponse {
+    total: number;
+    success: number;
+    failed: number;
+    details: { email?: string; success: boolean; error?: string }[];
+}
+
+export async function importAccounts(accounts: ImportAccountItem[]): Promise<ImportAccountsResponse> {
+    return await invoke('import_accounts', { accounts });
 }
 
 // 自定义标签相关

@@ -571,6 +571,11 @@ impl KiroAuthManager {
         self.inner.lock().await.auth_type
     }
 
+    /// Synchronous auth_type accessor for non-async contexts.
+    pub fn auth_type_sync(&self) -> Option<AuthType> {
+        self.inner.try_lock().ok().map(|g| g.auth_type)
+    }
+
     pub async fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.inner.lock().await.expires_at
     }
