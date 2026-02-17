@@ -25,7 +25,6 @@ cp -r webui/dist dist
 KIRO_DIST_PATH=./dist ./target/release/kiro-tools
 
 # 首次启动后，通过 WebUI (http://localhost:8045) 添加账号
-# 或设置 KIRO_CREDS_FILE 环境变量自动导入首个账号
 ```
 
 ## 账号管理
@@ -35,13 +34,7 @@ KIRO_DIST_PATH=./dist ./target/release/kiro-tools
 2. 在账号管理页面添加/删除账号
 3. 账号凭据加密存储在 `~/.kiro_tools/accounts/`
 
-### 方式二：环境变量自动导入（仅首次）
-```bash
-# 如果没有账号，程序会自动从 KIRO_CREDS_FILE 导入
-KIRO_CREDS_FILE=/path/to/kiro-auth-token.json ./target/release/kiro-tools
-```
-
-**注意**：导入后凭据持久化存储，后续启动无需再设置环境变量。
+**注意**：账号凭据加密持久化存储，后续启动无需重新配置。
 
 ## 一键脚本
 
@@ -67,11 +60,14 @@ sudo systemctl restart kiro-tools
 # 下载并安装
 sudo dpkg -i kiro-tools_*_amd64.deb
 
+# 安装时会自动创建:
+#   - kiro-tools 系统用户
+#   - /var/lib/kiro-tools 数据目录
+
 # 配置环境变量（可选）
 sudo nano /etc/kiro-tools/env
 # 取消注释并修改需要的配置项：
 #   KIRO_PORT=8045              # 监听端口
-#   KIRO_CREDS_FILE=/path/to/kiro-auth-token.json
 #   KIRO_API_KEY=sk-xxx         # API 密钥
 #   KIRO_WEB_PASSWORD=xxx       # Web UI 密码
 #   KIRO_AUTH_MODE=all_except_health
@@ -88,7 +84,7 @@ sudo systemctl status kiro-tools
 journalctl -u kiro-tools -f
 ```
 
-安装后二进制位于 `/usr/bin/kiro-tools`，前端文件位于 `/usr/share/kiro-tools/dist`。
+安装后二进制位于 `/usr/bin/kiro-tools`，前端文件位于 `/usr/share/kiro-tools/dist`，数据目录位于 `/var/lib/kiro-tools`。
 
 ## Docker
 
@@ -108,12 +104,8 @@ docker run -d -p 9000:9000 \
   -v kiro-data:/root/.kiro_tools \
   kiro-tools
 
-# 首次自动导入账号
-docker run -d -p 8045:8045 \
-  -e KIRO_CREDS_FILE=/app/creds/kiro-auth-token.json \
-  -v /path/to/creds:/app/creds:ro \
-  -v kiro-data:/root/.kiro_tools \
-  kiro-tools
+# 首次启动后通过 WebUI 添加账号
+# 访问 http://localhost:8045 进行配置
 ```
 
 **重要**：使用 volume 持久化账号数据，否则容器重启后账号丢失。
@@ -130,7 +122,9 @@ docker run -d -p 8045:8045 \
 | `KIRO_AUTH_MODE` / `AUTH_MODE` | 认证模式 (`off`, `strict`, `all_except_health`, `auto`) | `all_except_health` |
 | `KIRO_BIND_LOCAL_ONLY` | 是否仅本地访问 (`true`/`false`) | `false` |
 | `KIRO_DIST_PATH` | 前端资源路径 | `dist` |
-| `KIRO_CREDS_FILE` | 凭证文件路径（仅首次导入） | 无 |
+| `KIRO_CF_TUNNEL` | CF Tunnel 模式（`quick`=临时URL，或填入 token） | 无（不启用） |
+| `KIRO_CF_AUTO_INSTALL` | 自动安装 cloudflared（`true`/`false`） | `false` |
+
 
 **注意**：环境变量会覆盖配置文件中的值，并在首次设置后持久化到配置文件。
 
