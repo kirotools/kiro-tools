@@ -321,8 +321,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
         { label: t('monitor.filters.all'), value: '' },
         { label: t('monitor.filters.error'), value: '__ERROR__' },
         { label: t('monitor.filters.chat'), value: 'completions' },
-        { label: t('monitor.filters.claude'), value: 'claude' },
-        { label: t('monitor.filters.images'), value: 'images' }
+        { label: t('monitor.filters.claude'), value: 'claude' }
     ];
 
     const clearLogs = () => {
