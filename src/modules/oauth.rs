@@ -59,6 +59,16 @@ pub async fn register_auth_manager(account_id: &str, manager: Arc<KiroAuthManage
     managers.insert(account_id.to_string(), manager);
 }
 
+/// Move a KiroAuthManager from one account ID to another.
+/// Used to re-register a manager from a temp UUID to the real account ID after account creation.
+pub async fn move_auth_manager(from_id: &str, to_id: &str) {
+    let mut managers = get_auth_managers().lock().await;
+    if let Some(manager) = managers.remove(from_id) {
+        managers.insert(to_id.to_string(), manager);
+        tracing::debug!("Moved AUTH_MANAGER from {} to {}", from_id, to_id);
+    }
+}
+
 // ─── Core API (same signatures as before) ──────────────────────────────────
 
 /// Refresh access_token using Kiro auth.

@@ -3,7 +3,7 @@ use serde_json;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+
 
 use crate::models::{
     Account, AccountIndex, AccountSummary, QuotaData,
@@ -213,238 +213,7 @@ mod tests {
         println!("Missing index with existing accounts: successfully recovered {} accounts", index.accounts.len());
     }
 
-    #[test]
-    fn test_save_credentials_to_source_file_basic() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = TestDataDir::new();
-        
-        let source_file = dir.path().join("test-creds.json");
-        fs::write(&source_file, r#"{
-            "accessToken": "old_access_token",
-            "refreshToken": "old_refresh_token",
-            "expiresAt": "2026-01-01T00:00:00Z",
-            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
-            "region": "us-east-1",
-            "customField": "should_be_preserved"
-        }"#).unwrap();
 
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "new_access_token".to_string(),
-                "new_refresh_token".to_string(),
-                7200,
-                Some("test@example.com".to_string()),
-                Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/test-new".to_string()),
-                None,
-            ),
-        );
-        account.creds_file = Some(source_file.to_str().unwrap().to_string());
-        account.sync_back = true;
-
-        let result = save_credentials_to_source_file(&account);
-        assert!(result.is_ok(), "Should save credentials successfully: {:?}", result);
-
-        let content = fs::read_to_string(&source_file).unwrap();
-        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(data["accessToken"], "new_access_token");
-        assert_eq!(data["refreshToken"], "new_refresh_token");
-        assert_eq!(data["profileArn"], "arn:aws:codewhisperer:us-east-1:123456789012:profile/test-new");
-        assert_eq!(data["customField"], "should_be_preserved", "Custom fields should be preserved");
-        
-        println!("test_save_credentials_to_source_file_basic: passed");
-    }
-
-    #[test]
-    fn test_save_credentials_to_source_file_preserves_fields() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = TestDataDir::new();
-        
-        let source_file = dir.path().join("test-creds-preserve.json");
-        fs::write(&source_file, r#"{
-            "accessToken": "old_token",
-            "refreshToken": "old_refresh",
-            "expiresAt": "2026-01-01T00:00:00Z",
-            "region": "us-west-2",
-            "clientIdHash": "abc123",
-            "provider": "BuilderId",
-            "authMethod": "IdC",
-            "customData": {
-                "nested": "value"
-            }
-        }"#).unwrap();
-
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "updated_access".to_string(),
-                "updated_refresh".to_string(),
-                3600,
-                Some("test@example.com".to_string()),
-                None,
-                None,
-            ),
-        );
-        account.creds_file = Some(source_file.to_str().unwrap().to_string());
-        account.sync_back = true;
-
-        save_credentials_to_source_file(&account).unwrap();
-
-        let content = fs::read_to_string(&source_file).unwrap();
-        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(data["accessToken"], "updated_access");
-        assert_eq!(data["refreshToken"], "updated_refresh");
-        assert_eq!(data["region"], "us-west-2", "Region should be preserved");
-        assert_eq!(data["clientIdHash"], "abc123", "clientIdHash should be preserved");
-        assert_eq!(data["provider"], "BuilderId", "provider should be preserved");
-        assert_eq!(data["authMethod"], "IdC", "authMethod should be preserved");
-        assert_eq!(data["customData"]["nested"], "value", "Nested custom data should be preserved");
-        
-        println!("test_save_credentials_to_source_file_preserves_fields: passed");
-    }
-
-    #[test]
-    fn test_save_credentials_to_source_file_sync_back_false() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = TestDataDir::new();
-        
-        let source_file = dir.path().join("test-creds-no-sync.json");
-        fs::write(&source_file, r#"{
-            "accessToken": "original_token",
-            "refreshToken": "original_refresh"
-        }"#).unwrap();
-
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "new_token".to_string(),
-                "new_refresh".to_string(),
-                3600,
-                Some("test@example.com".to_string()),
-                None,
-                None,
-            ),
-        );
-        account.creds_file = Some(source_file.to_str().unwrap().to_string());
-        account.sync_back = false;
-
-        save_credentials_to_source_file(&account).unwrap();
-
-        let content = fs::read_to_string(&source_file).unwrap();
-        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(data["accessToken"], "original_token", "Token should NOT be updated when sync_back=false");
-        assert_eq!(data["refreshToken"], "original_refresh", "Refresh token should NOT be updated when sync_back=false");
-        
-        println!("test_save_credentials_to_source_file_sync_back_false: passed");
-    }
-
-    #[test]
-    fn test_save_credentials_to_source_file_no_creds_file() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "token".to_string(),
-                "refresh".to_string(),
-                3600,
-                Some("test@example.com".to_string()),
-                None,
-                None,
-            ),
-        );
-        account.creds_file = None;
-        account.sync_back = true;
-
-        let result = save_credentials_to_source_file(&account);
-        assert!(result.is_ok(), "Should return Ok when creds_file is None");
-        
-        println!("test_save_credentials_to_source_file_no_creds_file: passed");
-    }
-
-    #[test]
-    fn test_save_credentials_to_source_file_creates_new_file() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = TestDataDir::new();
-        
-        let source_file = dir.path().join("new-creds.json");
-        assert!(!source_file.exists(), "File should not exist initially");
-
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "new_access_token".to_string(),
-                "new_refresh_token".to_string(),
-                3600,
-                Some("test@example.com".to_string()),
-                Some("arn:aws:test".to_string()),
-                None,
-            ),
-        );
-        account.creds_file = Some(source_file.to_str().unwrap().to_string());
-        account.sync_back = true;
-
-        let result = save_credentials_to_source_file(&account);
-        assert!(result.is_ok(), "Should create new file successfully: {:?}", result);
-        assert!(source_file.exists(), "File should be created");
-
-        let content = fs::read_to_string(&source_file).unwrap();
-        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(data["accessToken"], "new_access_token");
-        assert_eq!(data["refreshToken"], "new_refresh_token");
-        assert_eq!(data["profileArn"], "arn:aws:test");
-        
-        println!("test_save_credentials_to_source_file_creates_new_file: passed");
-    }
-
-    #[test]
-    fn test_save_credentials_to_source_file_with_encrypted_tokens() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = TestDataDir::new();
-        
-        let source_file = dir.path().join("test-creds-encrypted.json");
-        fs::write(&source_file, r#"{
-            "accessToken": "old_token",
-            "refreshToken": "old_refresh"
-        }"#).unwrap();
-
-        let mut account = Account::new(
-            "test-id".to_string(),
-            "test@example.com".to_string(),
-            TokenData::new(
-                "plaintext_access".to_string(),
-                "plaintext_refresh".to_string(),
-                3600,
-                Some("test@example.com".to_string()),
-                None,
-                None,
-            ),
-        );
-        account.creds_file = Some(source_file.to_str().unwrap().to_string());
-        account.sync_back = true;
-        
-        account.encrypt_tokens().unwrap();
-        assert!(account.encrypted, "Account should be encrypted");
-
-        save_credentials_to_source_file(&account).unwrap();
-
-        let content = fs::read_to_string(&source_file).unwrap();
-        let data: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(data["accessToken"], "plaintext_access", "Should write decrypted token to source file");
-        assert_eq!(data["refreshToken"], "plaintext_refresh", "Should write decrypted refresh token to source file");
-        
-        println!("test_save_credentials_to_source_file_with_encrypted_tokens: passed");
-    }
 
     #[test]
     fn test_save_account_index_roundtrip() {
@@ -1051,57 +820,7 @@ fn save_account_to_dir(accounts_dir: &PathBuf, account: &Account) -> Result<(), 
     Ok(())
 }
 
-pub fn save_credentials_to_source_file(account: &Account) -> Result<(), String> {
-    if !account.sync_back {
-        return Ok(());
-    }
 
-    let creds_file = match &account.creds_file {
-        Some(path) => path,
-        None => return Ok(()),
-    };
-
-    let expanded_path = shellexpand::tilde(creds_file).to_string();
-    let path = PathBuf::from(&expanded_path);
-
-    let mut existing_data: serde_json::Value = if path.exists() {
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read credentials file {}: {}", creds_file, e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse credentials file {}: {}", creds_file, e))?
-    } else {
-        serde_json::json!({})
-    };
-
-    let (access_token, refresh_token) = if account.encrypted {
-        let mut temp_account = account.clone();
-        temp_account.decrypt_tokens()?;
-        (temp_account.token.access_token.clone(), temp_account.token.refresh_token.clone())
-    } else {
-        (account.token.access_token.clone(), account.token.refresh_token.clone())
-    };
-
-    existing_data["accessToken"] = serde_json::json!(access_token);
-    existing_data["refreshToken"] = serde_json::json!(refresh_token);
-    
-    let dt = DateTime::<Utc>::from_timestamp(account.token.expiry_timestamp, 0)
-        .ok_or_else(|| "Invalid timestamp".to_string())?;
-    existing_data["expiresAt"] = serde_json::json!(dt.to_rfc3339());
-    
-    if let Some(ref project_id) = account.token.project_id {
-        existing_data["profileArn"] = serde_json::json!(project_id);
-    }
-
-    let content = serde_json::to_string_pretty(&existing_data)
-        .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
-
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write credentials file {}: {}", creds_file, e))?;
-
-    tracing::debug!("Credentials synced back to source file: {}", creds_file);
-
-    Ok(())
-}
 
 /// List all accounts
 pub fn list_accounts() -> Result<Vec<Account>, String> {
@@ -1137,6 +856,129 @@ pub fn add_account(
     add_account_with_source(email, name, token, None, None)
 }
 
+/// Copy credential source (creds_file or sqlite_db) into the app's own data directory.
+/// Returns the local path to the copied credential file.
+/// This severs the link to the original source, preventing cross-account contamination
+/// when multiple accounts share the same credential source.
+fn import_creds_to_local(
+    account_id: &str,
+    creds_file: Option<&str>,
+    sqlite_db: Option<&str>,
+) -> Result<Option<String>, String> {
+    let accounts_dir = get_accounts_dir()?;
+    let local_creds_path = accounts_dir.join(format!("{}_creds.json", account_id));
+
+    // Priority: sqlite_db > creds_file (same as KiroAuthManager)
+    if let Some(db_path) = sqlite_db {
+        // Extract token + device registration data from SQLite and save as local JSON
+        let expanded = shellexpand::tilde(db_path).to_string();
+        let path = std::path::Path::new(&expanded);
+        if !path.exists() {
+            return Err(format!("SQLite database not found: {}", db_path));
+        }
+
+        let conn = rusqlite::Connection::open(path)
+            .map_err(|e| format!("Failed to open SQLite database: {}", e))?;
+
+        let mut creds_data = serde_json::Map::new();
+
+        // Extract token data
+        let token_keys = ["kirocli:social:token", "kirocli:odic:token", "codewhisperer:odic:token"];
+        for key in &token_keys {
+            match conn.query_row(
+                "SELECT value FROM auth_kv WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(value) => {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&value) {
+                        if let Some(obj) = data.as_object() {
+                            // Map sqlite field names to creds_file field names
+                            if let Some(v) = obj.get("refresh_token") { creds_data.insert("refreshToken".to_string(), v.clone()); }
+                            if let Some(v) = obj.get("access_token") { creds_data.insert("accessToken".to_string(), v.clone()); }
+                            if let Some(v) = obj.get("profile_arn") { creds_data.insert("profileArn".to_string(), v.clone()); }
+                            if let Some(v) = obj.get("region") { creds_data.insert("region".to_string(), v.clone()); }
+                            if let Some(v) = obj.get("expires_at") { creds_data.insert("expiresAt".to_string(), v.clone()); }
+                        }
+                    }
+                    break;
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(_) => continue,
+            }
+        }
+
+        // Extract device registration (client_id, client_secret for AWS SSO OIDC)
+        let reg_keys = ["kirocli:odic:device-registration", "codewhisperer:odic:device-registration"];
+        for key in &reg_keys {
+            match conn.query_row(
+                "SELECT value FROM auth_kv WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(value) => {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&value) {
+                        if let Some(obj) = data.as_object() {
+                            if let Some(v) = obj.get("client_id").or_else(|| obj.get("clientId")) {
+                                creds_data.insert("clientId".to_string(), v.clone());
+                            }
+                            if let Some(v) = obj.get("client_secret").or_else(|| obj.get("clientSecret")) {
+                                creds_data.insert("clientSecret".to_string(), v.clone());
+                            }
+                        }
+                    }
+                    break;
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(_) => continue,
+            }
+        }
+
+        if creds_data.is_empty() {
+            return Err("No credential data found in SQLite database".to_string());
+        }
+
+        let content = serde_json::to_string_pretty(&serde_json::Value::Object(creds_data))
+            .map_err(|e| format!("Failed to serialize extracted credentials: {}", e))?;
+        fs::write(&local_creds_path, content)
+            .map_err(|e| format!("Failed to write local creds file: {}", e))?;
+
+        crate::modules::logger::log_info(&format!(
+            "Imported SQLite credentials to local copy: {}",
+            local_creds_path.display()
+        ));
+
+        return Ok(Some(local_creds_path.to_string_lossy().to_string()));
+    }
+
+    if let Some(file_path) = creds_file {
+        // Copy the creds_file content to the local path
+        let expanded = shellexpand::tilde(file_path).to_string();
+        let source = std::path::Path::new(&expanded);
+        if !source.exists() {
+            // Source doesn't exist — no need to copy, the account has its own token data
+            crate::modules::logger::log_warn(&format!(
+                "Credentials file not found, skipping import: {}",
+                file_path
+            ));
+            return Ok(None);
+        }
+
+        fs::copy(source, &local_creds_path)
+            .map_err(|e| format!("Failed to copy credentials file: {}", e))?;
+
+        crate::modules::logger::log_info(&format!(
+            "Imported credentials file to local copy: {} -> {}",
+            file_path,
+            local_creds_path.display()
+        ));
+
+        return Ok(Some(local_creds_path.to_string_lossy().to_string()));
+    }
+
+    Ok(None)
+}
+
 pub fn add_account_with_source(
     email: String,
     name: Option<String>,
@@ -1158,14 +1000,21 @@ pub fn add_account_with_source(
     let account_id = Uuid::new_v4().to_string();
     let mut account = Account::new(account_id.clone(), email.clone(), token);
     account.name = name.clone();
-    
-    if let Some(path) = creds_file {
-        account.creds_file = Some(path);
-        account.sync_back = true;
-    }
 
-    if let Some(path) = sqlite_db {
-        account.sqlite_db = Some(path);
+    // [FIX] Copy-on-import: copy credential source to local data dir, sever link to original.
+    // This prevents cross-account contamination when multiple accounts share the same source.
+    match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
+        Ok(Some(local_path)) => {
+            account.creds_file = Some(local_path);
+            account.sync_back = false; // Never write back to external source
+        }
+        Ok(None) => {}
+        Err(e) => {
+            crate::modules::logger::log_warn(&format!(
+                "Failed to import credentials to local: {}, continuing without local copy",
+                e
+            ));
+        }
     }
 
     // Save account data
@@ -1229,16 +1078,24 @@ pub fn upsert_account_with_source(
                 account.token = token;
                 account.encrypted = false; // Reset flag when assigning new plaintext token
                 account.name = name.clone();
-                
-                if let Some(path) = creds_file {
-                    account.creds_file = Some(path);
-                    account.sync_back = true;
+
+                // [FIX] Copy-on-import: copy credential source to local, sever link to original.
+                if creds_file.is_some() || sqlite_db.is_some() {
+                    match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
+                        Ok(Some(local_path)) => {
+                            account.creds_file = Some(local_path);
+                            account.sqlite_db = None; // No longer needed; extracted to local JSON
+                            account.sync_back = false;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            crate::modules::logger::log_warn(&format!(
+                                "Failed to import credentials to local: {}", e
+                            ));
+                        }
+                    }
                 }
 
-                if let Some(path) = sqlite_db {
-                    account.sqlite_db = Some(path);
-                }
-                
                 if account.disabled
                     && (account.token.refresh_token != old_refresh_token
                         || account.token.access_token != old_access_token)
@@ -1264,16 +1121,21 @@ pub fn upsert_account_with_source(
                 ));
                 let mut account = Account::new(account_id.clone(), email.clone(), token);
                 account.name = name.clone();
-                
-                if let Some(path) = creds_file {
-                    account.creds_file = Some(path);
-                    account.sync_back = true;
+
+                // [FIX] Copy-on-import for recreated account
+                match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
+                    Ok(Some(local_path)) => {
+                        account.creds_file = Some(local_path);
+                        account.sync_back = false;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        crate::modules::logger::log_warn(&format!(
+                            "Failed to import credentials to local: {}", e
+                        ));
+                    }
                 }
 
-                if let Some(path) = sqlite_db {
-                    account.sqlite_db = Some(path);
-                }
-                
                 save_account(&account)?;
 
                 if let Some(idx_summary) = index.accounts.iter_mut().find(|s| s.id == account_id) {

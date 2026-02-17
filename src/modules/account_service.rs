@@ -84,6 +84,10 @@ impl AccountService {
                 sqlite_db.map(str::to_string),
             )?;
 
+        // [FIX] Re-register AUTH_MANAGER under the real account ID (remove temp UUID entry).
+        // This ensures future token refreshes reuse the existing manager instead of creating new ones.
+        modules::oauth::move_auth_manager(&temp_account_id, &account.id).await;
+
         // 6. [NEW] 自动获取配额信息（用于刷新时间排序）
         let email_for_log = account.email.clone();
         let access_token = token_res.access_token.clone();

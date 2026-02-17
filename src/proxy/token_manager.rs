@@ -1569,6 +1569,17 @@ impl TokenManager {
             let encrypted_refresh = crate::utils::crypto::encrypt_string(new_rt)
                 .map_err(|e| format!("加密 refresh_token 失败: {}", e))?;
             content["token"]["refresh_token"] = serde_json::Value::String(encrypted_refresh);
+        } else {
+            // No new refresh_token — re-encrypt the existing one if it's still plaintext.
+            // This can happen when the account file was written before the encryption fix.
+            let was_encrypted = content.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !was_encrypted {
+                if let Some(old_rt) = content["token"]["refresh_token"].as_str() {
+                    let encrypted_refresh = crate::utils::crypto::encrypt_string(old_rt)
+                        .map_err(|e| format!("加密 refresh_token 失败: {}", e))?;
+                    content["token"]["refresh_token"] = serde_json::Value::String(encrypted_refresh);
+                }
+            }
         }
 
         // Ensure encrypted flag is true (tokens are now encrypted)
@@ -1579,11 +1590,9 @@ impl TokenManager {
 
         tracing::debug!("已保存刷新后的 token 到账号 {}", account_id);
 
-        if let Ok(account) = Self::load_account_from_path(&entry.account_path).await {
-            if let Err(e) = crate::modules::account::save_credentials_to_source_file(&account) {
-                tracing::warn!("Failed to sync credentials to source file: {}", e);
-            }
-        }
+        // [FIX] No longer syncing credentials back to external source files.
+        // Each account's {id}.json is now the single source of truth.
+        // External creds_file was copied to local on import (import_creds_to_local).
 
         Ok(())
     }
