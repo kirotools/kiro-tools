@@ -190,7 +190,7 @@ async fn main() {
             }
 
             if let Err(e) = commands::proxy::internal_start_proxy_service(
-                config.proxy,
+                config.proxy.clone(),
                 &proxy_state,
                 crate::modules::integration::SystemManager::Headless,
                 cf_state.clone(),
@@ -200,6 +200,81 @@ async fn main() {
             }
 
             info!("Proxy service is running.");
+
+            // --- Cloudflare Tunnel auto-start via environment variable ---
+            // KIRO_CF_TUNNEL=quick  → Quick tunnel (temporary URL)
+            // KIRO_CF_TUNNEL=<token> → Auth tunnel with the given token
+            // KIRO_CF_AUTO_INSTALL=true → Auto-install cloudflared if not present
+            if let Ok(tunnel_val) = std::env::var("KIRO_CF_TUNNEL") {
+                let tunnel_val = tunnel_val.trim().to_string();
+                if !tunnel_val.is_empty() {
+                    let cf = cf_state.clone();
+                    let port = config.proxy.port;
+                    tokio::spawn(async move {
+                        if let Err(e) = cf.ensure_manager().await {
+                            error!("CF Tunnel: failed to init manager: {}", e);
+                            return;
+                        }
+
+                        let lock = cf.manager.read().await;
+                        let manager = match lock.as_ref() {
+                            Some(m) => m,
+                            None => { error!("CF Tunnel: manager not initialized"); return; }
+                        };
+
+                        // Check if installed, auto-install if requested
+                        let (installed, _) = manager.check_installed().await;
+                        if !installed {
+                            let auto_install = std::env::var("KIRO_CF_AUTO_INSTALL")
+                                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                                .unwrap_or(false);
+                            if auto_install {
+                                info!("CF Tunnel: cloudflared not found, auto-installing...");
+                                match manager.install().await {
+                                    Ok(s) => info!("CF Tunnel: installed, version: {:?}", s.version),
+                                    Err(e) => { error!("CF Tunnel: install failed: {}", e); return; }
+                                }
+                            } else {
+                                error!("CF Tunnel: cloudflared not installed. Set KIRO_CF_AUTO_INSTALL=true to auto-install.");
+                                return;
+                            }
+                        }
+
+                        // Build config
+                        let cf_config = if tunnel_val.eq_ignore_ascii_case("quick") {
+                            crate::modules::cloudflared::CloudflaredConfig {
+                                enabled: true,
+                                mode: crate::modules::cloudflared::TunnelMode::Quick,
+                                port,
+                                token: None,
+                                use_http2: true,
+                            }
+                        } else {
+                            crate::modules::cloudflared::CloudflaredConfig {
+                                enabled: true,
+                                mode: crate::modules::cloudflared::TunnelMode::Auth,
+                                port,
+                                token: Some(tunnel_val.clone()),
+                                use_http2: true,
+                            }
+                        };
+
+                        info!("CF Tunnel: starting ({:?} mode, port {})...", cf_config.mode, port);
+                        match manager.start(cf_config).await {
+                            Ok(status) => {
+                                if let Some(url) = &status.url {
+                                    info!("--------------------------------------------------");
+                                    info!("CF Tunnel URL: {}", url);
+                                    info!("--------------------------------------------------");
+                                } else {
+                                    info!("CF Tunnel: started, waiting for URL (check logs)...");
+                                }
+                            }
+                            Err(e) => error!("CF Tunnel: start failed: {}", e),
+                        }
+                    });
+                }
+            }
         }
         Err(e) => {
             error!("Failed to load config: {}", e);
