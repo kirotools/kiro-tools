@@ -150,42 +150,7 @@ pub async fn internal_start_proxy_service(
         }
     }
 
-    // Auto-import from KIRO_CREDS_FILE env var if no accounts exist (matching gateway behavior)
-    let active_accounts = if active_accounts == 0 {
-        if let Ok(creds_file) = std::env::var("KIRO_CREDS_FILE") {
-            let expanded = if creds_file.starts_with('~') {
-                if let Some(home) = dirs::home_dir() {
-                    creds_file.replacen('~', &home.to_string_lossy(), 1)
-                } else {
-                    creds_file.clone()
-                }
-            } else {
-                creds_file.clone()
-            };
-            if std::path::Path::new(&expanded).exists() {
-                tracing::info!("No accounts found, auto-importing from KIRO_CREDS_FILE: {}", expanded);
-
-                let svc = crate::modules::account_service::AccountService::new(integration.clone());
-                match svc.add_account(None, Some(&expanded), None).await {
-                    Ok(account) => {
-                        tracing::info!("Auto-imported account from KIRO_CREDS_FILE: {}", account.email);
-                        token_manager.load_accounts().await.unwrap_or(0)
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to auto-import from KIRO_CREDS_FILE: {}", e);
-                        0
-                    }
-                }
-            } else {
-                tracing::warn!("KIRO_CREDS_FILE set but file not found: {}", expanded);
-                0
-            }
-        } else {
-            0
-        }
-    } else {
-        active_accounts
-    };
+    // Note: KIRO_CREDS_FILE has been removed. Accounts are managed via WebUI only.
 
     // Populate model cache from Kiro API (matching gateway startup behavior)
     {

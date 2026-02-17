@@ -87,10 +87,6 @@ function Invoke-Start {
         Invoke-Build
     }
 
-    if (-not $env:KIRO_CREDS_FILE) {
-        Write-Warn "警告: KIRO_CREDS_FILE 未设置，凭证可能需要通过其他方式配置"
-    }
-
     Invoke-LogRotate
 
     Write-Success ">>> 启动 kiro-tools (端口: $Port)..."

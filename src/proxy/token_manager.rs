@@ -86,23 +86,7 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
-    fn expand_tilde_path(raw: &str) -> String {
-        if raw.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
-                return raw.replacen('~', &home.to_string_lossy(), 1);
-            }
-        }
-        raw.to_string()
-    }
-
     fn fallback_creds_file_path() -> Option<String> {
-        if let Ok(p) = std::env::var("KIRO_CREDS_FILE") {
-            let expanded = Self::expand_tilde_path(&p);
-            if std::path::Path::new(&expanded).exists() {
-                return Some(expanded);
-            }
-        }
-
         let home = dirs::home_dir()?;
         let default_path = home
             .join(".aws")
