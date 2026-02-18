@@ -83,6 +83,9 @@ pub struct TokenManager {
     max_concurrency_per_account: AtomicUsize,
     /// Per-account token refresh lock — prevents concurrent refresh requests for the same account
     refresh_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 连续 token 刷新失败计数 (account_id -> count).
+    /// 超过 REFRESH_FAIL_DISABLE_THRESHOLD 次后自动 disable 账号。
+    consecutive_refresh_failures: Arc<DashMap<String, u32>>,
 }
 
 impl TokenManager {
@@ -226,6 +229,7 @@ impl TokenManager {
             concurrency_slots: Arc::new(DashMap::new()),
             max_concurrency_per_account: AtomicUsize::new(1),
             refresh_locks: Arc::new(DashMap::new()),
+            consecutive_refresh_failures: Arc::new(DashMap::new()),
         }
     }
 
@@ -1403,6 +1407,9 @@ impl TokenManager {
                         Ok(token_response) => {
                             tracing::debug!("Token 刷新成功！");
 
+                            // 刷新成功 → 重置连续失败计数
+                            self.consecutive_refresh_failures.remove(&token.account_id);
+
                             // 更新本地内存对象供后续使用
                             token.access_token = token_response.access_token.clone();
                             token.expires_in = token_response.expires_in;
@@ -1431,7 +1438,23 @@ impl TokenManager {
                         }
                         Err(e) => {
                             tracing::error!("Token 刷新失败 ({}): {}，尝试下一个账号", token.email, e);
-                            if e.contains("\"invalid_grant\"") || e.contains("invalid_grant") {
+
+                            // ── 判断是否需要 disable 账号 ──────────────────────────────
+                            // 1. invalid_grant：refresh_token 被永久吊销，立即 disable。
+                            // 2. Bad credentials / 401 连续失败超过阈值：
+                            //    可能是 OIDC client 过期或 refresh_token 已被消费，
+                            //    kiro_auth.rs 已尝试重新加载并重试，若仍然失败则计数；
+                            //    超过 REFRESH_FAIL_DISABLE_THRESHOLD 次后 disable。
+                            const REFRESH_FAIL_DISABLE_THRESHOLD: u32 = 5;
+
+                            let should_disable_immediately =
+                                e.contains("\"invalid_grant\"") || e.contains("invalid_grant");
+
+                            let is_bad_credentials = e.contains("Bad credentials")
+                                || e.contains("401")
+                                || e.contains("HTTP error: 401");
+
+                            if should_disable_immediately {
                                 tracing::error!(
                                     "Disabling account due to invalid_grant ({}): refresh_token likely revoked/expired",
                                     token.email
@@ -1443,7 +1466,45 @@ impl TokenManager {
                                     )
                                     .await;
                                 self.tokens.remove(&token.account_id);
+                                self.consecutive_refresh_failures.remove(&token.account_id);
+                            } else if is_bad_credentials {
+                                let count = {
+                                    let mut entry = self
+                                        .consecutive_refresh_failures
+                                        .entry(token.account_id.clone())
+                                        .or_insert(0);
+                                    *entry += 1;
+                                    *entry
+                                };
+                                tracing::warn!(
+                                    "连续刷新失败 ({}) 次 ({}): {}",
+                                    count,
+                                    token.email,
+                                    e
+                                );
+                                if count >= REFRESH_FAIL_DISABLE_THRESHOLD {
+                                    tracing::error!(
+                                        "账号 {} 连续刷新失败 {} 次，自动 disable",
+                                        token.email,
+                                        count
+                                    );
+                                    let _ = self
+                                        .disable_account(
+                                            &token.account_id,
+                                            &format!(
+                                                "consecutive_refresh_failures:{}: {}",
+                                                count, e
+                                            ),
+                                        )
+                                        .await;
+                                    self.tokens.remove(&token.account_id);
+                                    self.consecutive_refresh_failures.remove(&token.account_id);
+                                }
+                            } else {
+                                // 非 Bad credentials 错误（网络超时等），不累计计数
+                                self.consecutive_refresh_failures.remove(&token.account_id);
                             }
+
                             // Avoid leaking account emails to API clients; details are still in logs.
                             last_error = Some(format!("Token refresh failed: {}", e));
                             attempted.insert(token.account_id.clone());
@@ -1729,10 +1790,63 @@ impl TokenManager {
                     0,
                 ))
             }
-            Err(e) => Err(format!(
-                "Token refresh failed for {}: {}",
-                email, e
-            )),
+            Err(e) => {
+                // ── 同步主循环的失败计数逻辑 ──────────────────────────────────────
+                // get_token_by_email 用于后台预刷新，失败同样需要计入连续失败计数。
+                const REFRESH_FAIL_DISABLE_THRESHOLD: u32 = 5;
+                let should_disable_immediately =
+                    e.contains("\"invalid_grant\"") || e.contains("invalid_grant");
+                let is_bad_credentials = e.contains("Bad credentials")
+                    || e.contains("401")
+                    || e.contains("HTTP error: 401");
+
+                if should_disable_immediately {
+                    tracing::error!(
+                        "get_token_by_email: invalid_grant for {}, disabling account",
+                        email
+                    );
+                    let _ = self
+                        .disable_account(&account_id, &format!("invalid_grant: {}", e))
+                        .await;
+                    self.tokens.remove(&account_id);
+                    self.consecutive_refresh_failures.remove(&account_id);
+                } else if is_bad_credentials {
+                    let count = {
+                        let mut entry = self
+                            .consecutive_refresh_failures
+                            .entry(account_id.clone())
+                            .or_insert(0);
+                        *entry += 1;
+                        *entry
+                    };
+                    tracing::warn!(
+                        "get_token_by_email: 连续刷新失败 ({}) 次 ({}): {}",
+                        count,
+                        email,
+                        e
+                    );
+                    if count >= REFRESH_FAIL_DISABLE_THRESHOLD {
+                        tracing::error!(
+                            "get_token_by_email: 账号 {} 连续刷新失败 {} 次，自动 disable",
+                            email,
+                            count
+                        );
+                        let _ = self
+                            .disable_account(
+                                &account_id,
+                                &format!("consecutive_refresh_failures:{}: {}", count, e),
+                            )
+                            .await;
+                        self.tokens.remove(&account_id);
+                        self.consecutive_refresh_failures.remove(&account_id);
+                    }
+                } else {
+                    // 非凭证错误（网络超时等），重置计数
+                    self.consecutive_refresh_failures.remove(&account_id);
+                }
+
+                Err(format!("Token refresh failed for {}: {}", email, e))
+            }
         }
     }
 
