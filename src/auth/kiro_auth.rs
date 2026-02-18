@@ -382,6 +382,36 @@ impl Inner {
                     Err(AuthError::HttpStatus { status: 400, body })
                 }
             }
+            Err(AuthError::HttpStatus { status: 401, body }) => {
+                // 401 on AwsSsoOidc refresh most commonly means the OIDC client
+                // registration (client_id / client_secret) has expired – NOT that the
+                // refresh_token itself is permanently revoked.  Try to reload the
+                // client credentials from the on-disk cache file and retry once.
+                warn!("AWS SSO OIDC refresh failed with 401, attempting client registration reload...");
+                let reloaded = if let Some(ref hash) = self.client_id_hash.clone() {
+                    self.load_enterprise_device_registration(hash);
+                    true
+                } else if self.creds_file.is_some() {
+                    if let Some(ref file_path) = self.creds_file.clone() {
+                        self.load_credentials_from_file(file_path);
+                    }
+                    true
+                } else if self.sqlite_db.is_some() {
+                    if let Some(ref db_path) = self.sqlite_db.clone() {
+                        self.load_credentials_from_sqlite(db_path);
+                    }
+                    true
+                } else {
+                    false
+                };
+
+                if reloaded {
+                    info!("Retrying AWS SSO OIDC refresh after client registration reload...");
+                    self.do_aws_sso_oidc_refresh().await
+                } else {
+                    Err(AuthError::HttpStatus { status: 401, body })
+                }
+            }
             Err(e) => Err(e),
         }
     }

@@ -78,6 +78,9 @@ pub struct EnterpriseDeviceRegistration {
     pub client_id: Option<String>,
     #[serde(rename = "clientSecret")]
     pub client_secret: Option<String>,
+    /// Unix timestamp when the client_secret expires (0 = unknown / not set).
+    #[serde(rename = "clientSecretExpiresAt", default)]
+    pub client_secret_expires_at: i64,
 }
 
 /// Response from Kiro Desktop Auth refresh endpoint.
