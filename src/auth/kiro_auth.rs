@@ -535,7 +535,15 @@ impl KiroAuthManager {
                     return Ok(inner.access_token.clone().unwrap());
                 }
                 if inner.refresh_token.is_some() {
-                    inner.refresh_token_request().await?;
+                    if let Err(e) = inner.refresh_token_request().await {
+                        // Second attempt also failed — fall back to the existing token if it
+                        // has not yet expired, rather than returning an error immediately.
+                        if inner.access_token.is_some() && !inner.is_token_expired() {
+                            warn!("Retry refresh (400) failed, using existing access_token until it expires");
+                            return Ok(inner.access_token.clone().unwrap());
+                        }
+                        return Err(e);
+                    }
                 } else {
                     return Err(AuthError::TokenExpiredRefreshFailed);
                 }
@@ -546,7 +554,15 @@ impl KiroAuthManager {
                     inner.load_credentials_from_file(file_path);
                 }
                 if inner.refresh_token.is_some() {
-                    inner.refresh_token_request().await?;
+                    if let Err(e) = inner.refresh_token_request().await {
+                        // Second attempt also failed — fall back to the existing token if it
+                        // has not yet expired, rather than returning an error immediately.
+                        if inner.access_token.is_some() && !inner.is_token_expired() {
+                            warn!("Retry refresh (401) failed, using existing access_token until it expires");
+                            return Ok(inner.access_token.clone().unwrap());
+                        }
+                        return Err(e);
+                    }
                 } else {
                     return Err(AuthError::TokenExpiredRefreshFailed);
                 }
@@ -1086,5 +1102,73 @@ mod tests {
         // get_access_token should return it directly without any network call.
         let result = mgr.get_access_token().await;
         assert_eq!(result.unwrap(), "at_oidc");
+    }
+
+    // --- Fallback to existing token when second refresh attempt also fails (P1 fix) ---
+
+    /// When a creds_file account's refresh fails and the access_token is still within
+    /// the hard expiry deadline (is_token_expired == false), the existing token should
+    /// be returned rather than propagating the error.
+    ///
+    /// This exercises the generic Err(e) fallback which applies to all error types
+    /// (including the new fallback inside the 400/401 retry arms).
+    #[tokio::test]
+    async fn test_get_access_token_creds_file_falls_back_to_existing_token_on_refresh_error() {
+        // Use a creds_file with a refresh_token so the code attempts a real refresh call.
+        // In the sandboxed test environment the network is unavailable, so any refresh
+        // attempt will fail.  The important invariant: the existing access_token must
+        // be returned because it has not yet passed is_token_expired().
+        let future_time = (Utc::now() + Duration::hours(2)).to_rfc3339();
+        let json = format!(
+            r#"{{"refreshToken":"rt_that_will_fail_on_network","accessToken":"existing_token","expiresAt":"{}"}}"#,
+            future_time
+        );
+        let f = write_temp_json(&json);
+        let path = f.path().to_str().unwrap().to_string();
+
+        let mgr = KiroAuthManager::new(None, None, None, Some(path.clone()), None, None, None);
+
+        // Force the token into the "expiring soon" window so the refresh path is triggered,
+        // but keep it well within the hard deadline so is_token_expired() stays false.
+        {
+            let mut inner = mgr.inner.lock().await;
+            inner.expires_at = Some(Utc::now() + Duration::seconds(60)); // within threshold
+            inner.access_token = Some("existing_token".into());
+        }
+
+        // In the sandbox network call fails → generic Err(e) arm →
+        // access_token is returned because it is not yet hard-expired.
+        let result = mgr.get_access_token().await;
+        assert_eq!(
+            result.unwrap(),
+            "existing_token",
+            "Should fall back to existing token when refresh fails and token is not yet hard-expired"
+        );
+    }
+
+    /// When a creds_file account's access_token is fully expired AND the refresh fails,
+    /// an error should be returned (no stale token should be served).
+    #[tokio::test]
+    async fn test_get_access_token_creds_file_returns_error_when_token_fully_expired_and_refresh_fails() {
+        let past_time = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let json = format!(
+            r#"{{"refreshToken":"rt_will_fail","accessToken":"expired_token","expiresAt":"{}"}}"#,
+            past_time
+        );
+        let f = write_temp_json(&json);
+        let path = f.path().to_str().unwrap().to_string();
+
+        let mgr = KiroAuthManager::new(None, None, None, Some(path.clone()), None, None, None);
+
+        {
+            let mut inner = mgr.inner.lock().await;
+            // Already past hard deadline
+            inner.expires_at = Some(Utc::now() - Duration::hours(1));
+            inner.access_token = Some("expired_token".into());
+        }
+
+        let result = mgr.get_access_token().await;
+        // Should NOT return the stale token — must error.
+        assert!(result.is_err(), "Should return error when token is fully expired and refresh fails");
     }
 }
