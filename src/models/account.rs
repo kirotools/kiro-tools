@@ -63,6 +63,11 @@ pub struct Account {
     /// Detected auth type from KiroAuthManager: "KiroDesktop" or "AwsSsoOidc"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_type: Option<String>,
+    /// Original credential source path before import-to-local (e.g. ~/.aws/sso/cache/kiro-auth-token.json).
+    /// Used as a recovery fallback on invalid_grant: if our local token chain breaks,
+    /// we can re-read from the original source (Kiro IDE may have updated it independently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_creds_source: Option<String>,
 }
 
 impl Account {
@@ -94,6 +99,7 @@ impl Account {
             sync_back: false,
             auth_source: None,
             auth_type: None,
+            original_creds_source: None,
         }
     }
 

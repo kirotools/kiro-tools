@@ -952,7 +952,18 @@ fn import_creds_to_local(
     }
 
     if let Some(file_path) = creds_file {
-        // Copy the creds_file content to the local path
+        // If the local copy already exists, preserve it — our program may have
+        // rotated the refresh_token since the original import.  Re-copying from
+        // the source file would overwrite the rotated token with a stale one,
+        // causing invalid_grant on the next refresh attempt.
+        if local_creds_path.exists() {
+            crate::modules::logger::log_info(&format!(
+                "Local credentials copy already exists, skipping re-import to preserve token chain: {}",
+                local_creds_path.display()
+            ));
+            return Ok(Some(local_creds_path.to_string_lossy().to_string()));
+        }
+
         let expanded = shellexpand::tilde(file_path).to_string();
         let source = std::path::Path::new(&expanded);
         if !source.exists() {
@@ -1002,6 +1013,12 @@ pub fn add_account_with_source(
     let account_id = Uuid::new_v4().to_string();
     let mut account = Account::new(account_id.clone(), email.clone(), token);
     account.name = name.clone();
+
+    // Store original source path BEFORE import replaces it with local copy.
+    // This allows recovery from invalid_grant by re-reading from the original source.
+    if creds_file.is_some() {
+        account.original_creds_source = creds_file.as_ref().map(|s| s.to_string());
+    }
 
     // [FIX] Copy-on-import: copy credential source to local data dir, sever link to original.
     // This prevents cross-account contamination when multiple accounts share the same source.
@@ -1087,6 +1104,11 @@ pub fn upsert_account_with_source(
                 account.encrypted = false; // Reset flag when assigning new plaintext token
                 account.name = name.clone();
 
+                // Store original source path BEFORE import replaces it with local copy.
+                if creds_file.is_some() {
+                    account.original_creds_source = creds_file.clone();
+                }
+
                 // [FIX] Copy-on-import: copy credential source to local, sever link to original.
                 if creds_file.is_some() || sqlite_db.is_some() {
                     match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
@@ -1137,6 +1159,11 @@ pub fn upsert_account_with_source(
                 ));
                 let mut account = Account::new(account_id.clone(), email.clone(), token);
                 account.name = name.clone();
+
+                // Store original source path for recovery.
+                if creds_file.is_some() {
+                    account.original_creds_source = creds_file.clone();
+                }
 
                 // [FIX] Copy-on-import for recreated account
                 match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
