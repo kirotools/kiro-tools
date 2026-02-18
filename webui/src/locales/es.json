@@ -114,6 +114,16 @@
     "edit_label": "Editar etiqueta",
     "custom_label_placeholder": "Ingrese etiqueta personalizada",
     "label_updated": "Etiqueta actualizada",
+    "update_credentials": "Actualizar Credenciales",
+    "update_creds": {
+      "title": "Actualizar Credenciales",
+      "desc": "Proporcione un archivo de credenciales nuevo para volver a habilitar esta cuenta deshabilitada.",
+      "loading": "Actualizando credenciales...",
+      "success": "¡Credenciales actualizadas y cuenta rehabilitada!",
+      "file_label": "Ruta del Archivo de Credenciales",
+      "hint": "Ingrese la ruta a un archivo de credenciales nuevo (por ejemplo, de Kiro IDE o kiro-account-manager).",
+      "btn_update": "Actualizar y Rehabilitar"
+    },
     "add_account": "Agregar Cuenta",
     "refresh_all": "Actualizar Todas",
     "refresh_selected": "Actualizar ({{count}})",

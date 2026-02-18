@@ -1,5 +1,6 @@
 use crate::models::{Account, TokenData};
 use crate::modules;
+use chrono::Utc;
 use serde_json::Value;
 
 fn is_http_unauthorized_error(err: &str) -> bool {
@@ -270,6 +271,72 @@ impl AccountService {
     /// 获取当前 ID
     pub fn get_current_id(&self) -> Result<Option<String>, String> {
         modules::get_current_account_id()
+    }
+
+    /// Force-update credentials for a disabled account.
+    ///
+    /// Replaces the local `_creds.json` with fresh content from a new source,
+    /// performs a test refresh to verify the credentials work, then re-enables
+    /// the account — matching kiro-account-manager's behavior of always being
+    /// able to recover an account by providing fresh credentials.
+    pub async fn update_credentials(
+        &self,
+        account_id: &str,
+        creds_file: Option<&str>,
+        sqlite_db: Option<&str>,
+    ) -> Result<Account, String> {
+        // 1. Force replace _creds.json and clear disabled state
+        let account = modules::account::force_update_credentials(account_id, creds_file, sqlite_db)?;
+
+        // 2. Drop any stale in-memory auth manager so a fresh one is created
+        // from the new credentials
+        modules::oauth::remove_auth_manager(account_id).await;
+
+        // 3. Test-refresh to verify the credentials actually work
+        let token_res = modules::oauth::refresh_access_token_with_source(
+            None,
+            account.creds_file.as_deref(),
+            None,
+            Some(account_id),
+        )
+        .await
+        .map_err(|e| format!("Credentials test refresh failed: {}", e))?;
+
+        // 4. Save the verified tokens back to the account
+        let mut account = modules::account::load_account(account_id)?;
+        account.token.access_token = token_res.access_token.clone();
+        account.token.expires_in = token_res.expires_in;
+        account.token.expiry_timestamp = Utc::now().timestamp() + token_res.expires_in;
+        if let Some(ref new_rt) = token_res.refresh_token {
+            account.token.refresh_token = new_rt.clone();
+        }
+        account.encrypted = false;
+        modules::account::save_account(&account)?;
+
+        // 5. Fetch fresh quota info
+        match modules::quota::fetch_quota(&token_res.access_token, &account.email, Some(account_id)).await {
+            Ok((quota_data, new_project_id)) => {
+                let mut account = modules::account::load_account(account_id)?;
+                account.quota = Some(quota_data);
+                if let Some(pid) = new_project_id {
+                    account.token.project_id = Some(pid);
+                }
+                let _ = modules::account::save_account(&account);
+            }
+            Err(e) => {
+                modules::logger::log_warn(&format!(
+                    "[Service] Failed to fetch quota after credential update for {}: {}",
+                    account.email, e
+                ));
+            }
+        }
+
+        modules::logger::log_info(&format!(
+            "[Service] Credentials updated and verified for: {} ({})",
+            account.email, account_id
+        ));
+
+        modules::account::load_account(account_id)
     }
 }
 

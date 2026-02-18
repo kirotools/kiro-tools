@@ -117,6 +117,16 @@
     "edit_label": "라벨 편집",
     "custom_label_placeholder": "사용자 정의 라벨 입력",
     "label_updated": "라벨이 업데이트되었습니다",
+    "update_credentials": "자격 증명 업데이트",
+    "update_creds": {
+      "title": "자격 증명 업데이트",
+      "desc": "새 자격 증명 파일을 제공하여 비활성화된 계정을 다시 활성화합니다.",
+      "loading": "자격 증명 업데이트 중...",
+      "success": "자격 증명이 업데이트되고 계정이 다시 활성화되었습니다!",
+      "file_label": "자격 증명 파일 경로",
+      "hint": "새 자격 증명 파일의 경로를 입력하세요 (예: Kiro IDE 또는 kiro-account-manager에서 가져온 파일).",
+      "btn_update": "업데이트 및 재활성화"
+    },
     "add_account": "계정 추가",
     "refresh_all": "전체 새로고침",
     "refresh_selected": "선택 새로고침 ({{count}})",

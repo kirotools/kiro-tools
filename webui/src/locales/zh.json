@@ -118,6 +118,16 @@
     "edit_label": "编辑标签",
     "custom_label_placeholder": "输入自定义标签",
     "label_updated": "标签已更新",
+    "update_credentials": "更新凭证",
+    "update_creds": {
+      "title": "更新凭证",
+      "desc": "提供新的凭证文件以重新启用此已禁用的账号。",
+      "loading": "正在更新凭证...",
+      "success": "凭证已更新，账号已重新启用！",
+      "file_label": "凭证文件路径",
+      "hint": "输入新凭证文件的路径（例如来自 Kiro IDE 或 kiro-account-manager）。",
+      "btn_update": "更新并重新启用"
+    },
     "add_account": "添加账号",
     "refresh_all": "刷新所有",
     "refresh_selected": "刷新 ({{count}})",

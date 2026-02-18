@@ -46,6 +46,7 @@ function Dashboard() {
     toggleProxyStatus,
     reorderAccounts,
     updateAccountLabel,
+    updateCredentials,
   } = useAccountStore();
   const { config, showAllQuotas, toggleShowAllQuotas } = useConfigStore();
 
@@ -72,6 +73,36 @@ function Dashboard() {
     enable: boolean;
   } | null>(null);
   const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
+
+  // Update credentials dialog state
+  const [updateCredsTarget, setUpdateCredsTarget] = useState<string | null>(null);
+  const [updateCredsFile, setUpdateCredsFile] = useState("");
+  const [updateCredsStatus, setUpdateCredsStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [updateCredsMessage, setUpdateCredsMessage] = useState("");
+
+  const handleUpdateCredentials = (accountId: string) => {
+    setUpdateCredsTarget(accountId);
+    setUpdateCredsFile("");
+    setUpdateCredsStatus("idle");
+    setUpdateCredsMessage("");
+  };
+
+  const executeUpdateCredentials = async () => {
+    if (!updateCredsTarget || !updateCredsFile.trim()) return;
+    setUpdateCredsStatus("loading");
+    setUpdateCredsMessage(t("accounts.update_creds.loading", "Updating credentials..."));
+    try {
+      await updateCredentials(updateCredsTarget, { credsFile: updateCredsFile.trim() });
+      setUpdateCredsStatus("success");
+      setUpdateCredsMessage(t("accounts.update_creds.success", "Credentials updated and account re-enabled!"));
+      setTimeout(() => {
+        setUpdateCredsTarget(null);
+      }, 1500);
+    } catch (error) {
+      setUpdateCredsStatus("error");
+      setUpdateCredsMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const handleUpdateLabel = async (accountId: string, label: string) => {
     try {
@@ -1048,6 +1079,7 @@ function Dashboard() {
                 }
                 onReorder={reorderAccounts}
                 onUpdateLabel={handleUpdateLabel}
+                onUpdateCredentials={handleUpdateCredentials}
               />
             </div>
           </div>
@@ -1072,6 +1104,7 @@ function Dashboard() {
                 )
               }
               onUpdateLabel={handleUpdateLabel}
+              onUpdateCredentials={handleUpdateCredentials}
             />
           </div>
         )}
@@ -1160,6 +1193,77 @@ function Dashboard() {
               : t("accounts.dialog.disable_proxy_msg")
           }
         />
+      )}
+
+      {/* Update Credentials Dialog */}
+      {updateCredsTarget && (
+        <div
+          className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0 }}
+        >
+          <div
+            className="absolute inset-0 z-[0]"
+            onClick={() => updateCredsStatus !== "loading" && setUpdateCredsTarget(null)}
+          />
+          <div className="bg-white dark:bg-base-100 text-gray-900 dark:text-base-content rounded-2xl shadow-2xl w-full max-w-lg p-6 relative z-[10] m-4">
+            <h3 className="font-bold text-lg mb-2">
+              {t("accounts.update_creds.title", "Update Credentials")}
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              {t("accounts.update_creds.desc", "Provide a fresh credentials file to re-enable this disabled account.")}
+            </p>
+
+            {updateCredsStatus !== "idle" && updateCredsMessage && (
+              <div
+                className={cn(
+                  "mb-4 text-sm py-2 px-3 rounded-lg flex items-center gap-2",
+                  updateCredsStatus === "loading" && "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300",
+                  updateCredsStatus === "success" && "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300",
+                  updateCredsStatus === "error" && "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                )}
+              >
+                {updateCredsStatus === "loading" && <RefreshCw className="w-4 h-4 animate-spin" />}
+                <span>{updateCredsMessage}</span>
+              </div>
+            )}
+
+            <div className="bg-gray-50 dark:bg-base-200 p-4 rounded-lg border border-gray-200 dark:border-base-300">
+              <label className="block text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">
+                {t("accounts.update_creds.file_label", "Credentials File Path")}
+              </label>
+              <input
+                type="text"
+                className="input input-bordered w-full font-mono text-sm focus:outline-none focus:border-blue-500 transition-colors bg-white dark:bg-base-100 text-gray-900 dark:text-base-content border-gray-300 dark:border-base-300"
+                placeholder="~/.aws/sso/cache/kiro-auth-token.json"
+                value={updateCredsFile}
+                onChange={(e) => setUpdateCredsFile(e.target.value)}
+                disabled={updateCredsStatus === "loading" || updateCredsStatus === "success"}
+                onKeyDown={(e) => e.key === "Enter" && executeUpdateCredentials()}
+              />
+              <p className="text-[10px] text-gray-400 mt-2">
+                {t("accounts.update_creds.hint", "Enter the path to a fresh credentials file (e.g. from Kiro IDE or kiro-account-manager).")}
+              </p>
+            </div>
+
+            <div className="flex gap-3 w-full mt-6">
+              <button
+                className="flex-1 px-4 py-2.5 bg-gray-100 dark:bg-base-200 text-gray-700 dark:text-gray-300 font-medium rounded-xl hover:bg-gray-200 dark:hover:bg-base-300 transition-colors"
+                onClick={() => setUpdateCredsTarget(null)}
+                disabled={updateCredsStatus === "loading" || updateCredsStatus === "success"}
+              >
+                {t("accounts.add.btn_cancel")}
+              </button>
+              <button
+                className="flex-1 px-4 py-2.5 text-white font-medium rounded-xl shadow-md transition-all bg-amber-500 hover:bg-amber-600 focus:ring-amber-500 flex justify-center items-center gap-2"
+                onClick={executeUpdateCredentials}
+                disabled={updateCredsStatus === "loading" || updateCredsStatus === "success" || !updateCredsFile.trim()}
+              >
+                {updateCredsStatus === "loading" && <RefreshCw className="w-4 h-4 animate-spin" />}
+                {t("accounts.update_creds.btn_update", "Update & Re-enable")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

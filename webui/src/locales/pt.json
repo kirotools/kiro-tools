@@ -115,6 +115,16 @@
     "edit_label": "Editar rótulo",
     "custom_label_placeholder": "Digite um rótulo personalizado",
     "label_updated": "Rótulo atualizado",
+    "update_credentials": "Atualizar Credenciais",
+    "update_creds": {
+      "title": "Atualizar Credenciais",
+      "desc": "Forneça um arquivo de credenciais novo para reativar esta conta desativada.",
+      "loading": "Atualizando credenciais...",
+      "success": "Credenciais atualizadas e conta reativada!",
+      "file_label": "Caminho do Arquivo de Credenciais",
+      "hint": "Digite o caminho para um arquivo de credenciais novo (ex: do Kiro IDE ou kiro-account-manager).",
+      "btn_update": "Atualizar e Reativar"
+    },
     "add_account": "Adicionar Conta",
     "refresh_all": "Atualizar Todas",
     "refresh_selected": "Atualizar ({{count}})",

@@ -102,6 +102,19 @@ export async function importAccounts(accounts: ImportAccountItem[]): Promise<Imp
     return await invoke('import_accounts', { accounts });
 }
 
+// 更新凭据 (force-replace _creds.json and re-enable disabled account)
+export interface UpdateCredentialsParams {
+    credsFile?: string;
+    sqliteDb?: string;
+}
+
+export async function updateAccountCredentials(
+    accountId: string,
+    params: UpdateCredentialsParams
+): Promise<Account> {
+    return await invoke('update_account_credentials', { accountId, ...params });
+}
+
 // 自定义标签相关
 export async function updateAccountLabel(accountId: string, label: string): Promise<void> {
     return await invoke('update_account_label', { accountId, label });

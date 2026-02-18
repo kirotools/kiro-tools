@@ -115,6 +115,16 @@
     "edit_label": "Etiketi Düzenle",
     "custom_label_placeholder": "Özel etiket girin",
     "label_updated": "Etiket güncellendi",
+    "update_credentials": "Kimlik Bilgilerini Güncelle",
+    "update_creds": {
+      "title": "Kimlik Bilgilerini Güncelle",
+      "desc": "Bu devre dışı bırakılmış hesabı yeniden etkinleştirmek için yeni bir kimlik bilgisi dosyası sağlayın.",
+      "loading": "Kimlik bilgileri güncelleniyor...",
+      "success": "Kimlik bilgileri güncellendi ve hesap yeniden etkinleştirildi!",
+      "file_label": "Kimlik Bilgisi Dosya Yolu",
+      "hint": "Yeni bir kimlik bilgisi dosyasının yolunu girin (örn. Kiro IDE veya kiro-account-manager'dan).",
+      "btn_update": "Güncelle ve Yeniden Etkinleştir"
+    },
     "add_account": "Hesap Ekle",
     "refresh_all": "Tümünü Yenile",
     "refresh_selected": "Yenile ({{count}})",

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ArrowRightLeft, RefreshCw, Trash2, Download, Info, Lock, Ban, Diamond, Gem, Circle, ToggleLeft, ToggleRight, Tag, X, Check } from 'lucide-react';
+import { ArrowRightLeft, RefreshCw, Trash2, Download, Info, Lock, Ban, Diamond, Gem, Circle, ToggleLeft, ToggleRight, Tag, X, Check, KeyRound } from 'lucide-react';
 import { Account } from '../../types/account';
 import { cn } from '../../utils/cn';
 import { useTranslation } from 'react-i18next';
@@ -21,6 +21,7 @@ interface AccountCardProps {
     onDelete: () => void;
     onToggleProxy: () => void;
     onUpdateLabel?: (label: string) => void;
+    onUpdateCredentials?: () => void;
 }
 
 // 使用统一的模型配置
@@ -30,7 +31,7 @@ const DEFAULT_MODELS = Object.entries(MODEL_CONFIG).map(([id, config]) => ({
     Icon: config.Icon
 }));
 
-function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, isRefreshing, isSwitching = false, onSwitch, onRefresh, onViewDetails, onExport, onDelete, onToggleProxy, onUpdateLabel }: AccountCardProps) {
+function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, isRefreshing, isSwitching = false, onSwitch, onRefresh, onViewDetails, onExport, onDelete, onToggleProxy, onUpdateLabel, onUpdateCredentials }: AccountCardProps) {
     const { t } = useTranslation();
     const { config, showAllQuotas } = useConfigStore();
     const isDisabled = Boolean(account.disabled);
@@ -284,6 +285,15 @@ function AccountCard({ account, selected, onSelect, isCurrent: propIsCurrent, is
                     >
                         <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
                     </button>
+                    {isDisabled && onUpdateCredentials && (
+                        <button
+                            className="p-1.5 text-amber-500 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-all animate-pulse"
+                            onClick={(e) => { e.stopPropagation(); onUpdateCredentials(); }}
+                            title={t('accounts.update_credentials', 'Update Credentials')}
+                        >
+                            <KeyRound className="w-3.5 h-3.5" />
+                        </button>
+                    )}
                     <button
                         className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
                         onClick={(e) => { e.stopPropagation(); onExport(); }}

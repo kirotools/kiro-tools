@@ -121,6 +121,16 @@
     "edit_label": "Edit Label",
     "custom_label_placeholder": "Enter custom label",
     "label_updated": "Label updated",
+    "update_credentials": "Update Credentials",
+    "update_creds": {
+      "title": "Update Credentials",
+      "desc": "Provide a fresh credentials file to re-enable this disabled account.",
+      "loading": "Updating credentials...",
+      "success": "Credentials updated and account re-enabled!",
+      "file_label": "Credentials File Path",
+      "hint": "Enter the path to a fresh credentials file (e.g. from Kiro IDE or kiro-account-manager).",
+      "btn_update": "Update & Re-enable"
+    },
     "add_account": "Add Account",
     "refresh_all": "Refresh All",
     "refresh_selected": "Refresh ({{count}})",

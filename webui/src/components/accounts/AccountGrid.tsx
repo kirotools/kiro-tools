@@ -16,10 +16,11 @@ interface AccountGridProps {
     onDelete: (accountId: string) => void;
     onToggleProxy: (accountId: string) => void;
     onUpdateLabel?: (accountId: string, label: string) => void;
+    onUpdateCredentials?: (accountId: string) => void;
 }
 
 
-function AccountGrid({ accounts, selectedIds, refreshingIds, onToggleSelect, currentAccountId, switchingAccountId, onSwitch, onRefresh, onViewDetails, onExport, onDelete, onToggleProxy, onUpdateLabel }: AccountGridProps) {
+function AccountGrid({ accounts, selectedIds, refreshingIds, onToggleSelect, currentAccountId, switchingAccountId, onSwitch, onRefresh, onViewDetails, onExport, onDelete, onToggleProxy, onUpdateLabel, onUpdateCredentials }: AccountGridProps) {
     const { t } = useTranslation();
     if (accounts.length === 0) {
         return (
@@ -48,6 +49,7 @@ function AccountGrid({ accounts, selectedIds, refreshingIds, onToggleSelect, cur
                     onDelete={() => onDelete(account.id)}
                     onToggleProxy={() => onToggleProxy(account.id)}
                     onUpdateLabel={onUpdateLabel ? (label: string) => onUpdateLabel(account.id, label) : undefined}
+                    onUpdateCredentials={onUpdateCredentials ? () => onUpdateCredentials(account.id) : undefined}
                 />
             ))}
         </div>

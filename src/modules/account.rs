@@ -1188,6 +1188,80 @@ pub fn upsert_account_with_source(
     add_account_with_source(email, name, token, creds_file, sqlite_db, auth_source, auth_type_str)
 }
 
+/// Force-update credentials for an existing account.
+///
+/// This replaces the local `_creds.json` with fresh content from a new source,
+/// clears disabled state, and re-enables the account for proxy use.
+/// Used when the local token chain has broken (e.g. invalid_grant) and the user
+/// has obtained fresh credentials from kiro-account-manager or Kiro IDE.
+pub fn force_update_credentials(
+    account_id: &str,
+    creds_file: Option<&str>,
+    sqlite_db: Option<&str>,
+) -> Result<Account, String> {
+    let _lock = ACCOUNT_INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("failed_to_acquire_lock: {}", e))?;
+
+    let mut account = load_account(account_id)?;
+
+    // Delete existing local creds so import_creds_to_local will do a fresh copy
+    let accounts_dir = get_accounts_dir()?;
+    let local_creds_path = accounts_dir.join(format!("{}_creds.json", account_id));
+    if local_creds_path.exists() {
+        fs::remove_file(&local_creds_path)
+            .map_err(|e| format!("Failed to remove old credentials: {}", e))?;
+        crate::modules::logger::log_info(&format!(
+            "Removed stale local credentials: {}",
+            local_creds_path.display()
+        ));
+    }
+
+    // Import fresh credentials
+    match import_creds_to_local(account_id, creds_file, sqlite_db) {
+        Ok(Some(local_path)) => {
+            account.creds_file = Some(local_path);
+            account.sqlite_db = None;
+            account.sync_back = false;
+        }
+        Ok(None) => {
+            return Err("No valid credential source provided".to_string());
+        }
+        Err(e) => {
+            return Err(format!("Failed to import new credentials: {}", e));
+        }
+    }
+
+    // Clear disabled state
+    account.disabled = false;
+    account.disabled_reason = None;
+    account.disabled_at = None;
+
+    // Also clear proxy disabled if it was auto-disabled
+    if account.proxy_disabled {
+        account.proxy_disabled = false;
+        account.proxy_disabled_reason = None;
+        account.proxy_disabled_at = None;
+    }
+
+    account.update_last_used();
+    save_account(&account)?;
+
+    // Update index summary
+    let mut index = load_account_index()?;
+    if let Some(summary) = index.accounts.iter_mut().find(|s| s.id == account_id) {
+        summary.disabled = false;
+    }
+    save_account_index(&index)?;
+
+    crate::modules::logger::log_info(&format!(
+        "Force-updated credentials and re-enabled account: {} ({})",
+        account.email, account_id
+    ));
+
+    Ok(account)
+}
+
 /// Delete account
 pub fn delete_account(account_id: &str) -> Result<(), String> {
     let _lock = ACCOUNT_INDEX_LOCK

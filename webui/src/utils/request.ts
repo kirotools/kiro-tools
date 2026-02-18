@@ -3,7 +3,7 @@ const isTauri = false; // Force web mode
 
 
 // 命令到 API 的映射
-const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'DELETE' | 'PATCH' }> = {
+const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'DELETE' | 'PATCH' | 'PUT' }> = {
   // Accounts
   'list_accounts': { url: '/api/accounts', method: 'GET' },
   'get_current_account': { url: '/api/accounts/current', method: 'GET' },
@@ -16,6 +16,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'refresh_all_quotas': { url: '/api/accounts/refresh', method: 'POST' },
   'reorder_accounts': { url: '/api/accounts/reorder', method: 'POST' },
   'toggle_proxy_status': { url: '/api/accounts/:accountId/toggle-proxy', method: 'POST' },
+  'update_account_credentials': { url: '/api/accounts/:accountId/credentials', method: 'PUT' },
   'update_account_label': { url: '/api/accounts/:accountId/label', method: 'POST' },
   'export_accounts': { url: '/api/accounts/export', method: 'POST' },
   'import_accounts': { url: '/api/accounts/import', method: 'POST' },
@@ -189,7 +190,7 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
     });
     const qs = params.toString();
     if (qs) url += `?${qs}`;
-  } else if ((mapping.method === 'POST' || mapping.method === 'PATCH') && bodyArgs) {
+  } else if ((mapping.method === 'POST' || mapping.method === 'PATCH' || mapping.method === 'PUT') && bodyArgs) {
     // [FIX] 如果有 request 包装，提取其内容作为 body
     const body = bodyArgs.request !== undefined ? bodyArgs.request : bodyArgs;
     options.body = JSON.stringify(body);

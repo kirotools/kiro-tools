@@ -125,6 +125,16 @@
     "edit_label": "ラベルを編集",
     "custom_label_placeholder": "カスタムラベルを入力",
     "label_updated": "ラベルが更新されました",
+    "update_credentials": "認証情報を更新",
+    "update_creds": {
+      "title": "認証情報を更新",
+      "desc": "新しい認証情報ファイルを指定して、この無効化されたアカウントを再有効化します。",
+      "loading": "認証情報を更新中...",
+      "success": "認証情報が更新され、アカウントが再有効化されました！",
+      "file_label": "認証情報ファイルのパス",
+      "hint": "新しい認証情報ファイルのパスを入力してください（例: Kiro IDE または kiro-account-manager から取得）。",
+      "btn_update": "更新して再有効化"
+    },
     "add_account": "アカウント追加",
     "refresh_all": "すべて更新",
     "refresh_selected": "更新 ({{count}})",

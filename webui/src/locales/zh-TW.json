@@ -118,6 +118,16 @@
     "edit_label": "編輯標籤",
     "custom_label_placeholder": "輸入自訂標籤",
     "label_updated": "標籤已更新",
+    "update_credentials": "更新憑證",
+    "update_creds": {
+      "title": "更新憑證",
+      "desc": "提供新的憑證檔案以重新啟用此已停用的帳號。",
+      "loading": "正在更新憑證...",
+      "success": "憑證已更新，帳號已重新啟用！",
+      "file_label": "憑證檔案路徑",
+      "hint": "輸入新憑證檔案的路徑（例如來自 Kiro IDE 或 kiro-account-manager）。",
+      "btn_update": "更新並重新啟用"
+    },
     "add_account": "新增帳號",
     "refresh_all": "重新整理所有",
     "refresh_selected": "重新整理 ({{count}})",

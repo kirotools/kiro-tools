@@ -39,6 +39,7 @@ import {
     Tag,
     X,
     Check,
+    KeyRound,
 } from 'lucide-react';
 import { Account } from '../../types/account';
 import { useTranslation } from 'react-i18next';
@@ -67,6 +68,7 @@ interface AccountTableProps {
     onDelete: (accountId: string) => void;
     onToggleProxy: (accountId: string) => void;
     onUpdateLabel?: (accountId: string, label: string) => void;
+    onUpdateCredentials?: (accountId: string) => void;
     /** 拖拽排序回调，当用户完成拖拽时触发 */
     onReorder?: (accountIds: string[]) => void;
 }
@@ -86,6 +88,7 @@ interface SortableRowProps {
     onDelete: () => void;
     onToggleProxy: () => void;
     onUpdateLabel?: (label: string) => void;
+    onUpdateCredentials?: () => void;
 }
 
 interface AccountRowContentProps {
@@ -100,6 +103,7 @@ interface AccountRowContentProps {
     onDelete: () => void;
     onToggleProxy: () => void;
     onUpdateLabel?: (label: string) => void;
+    onUpdateCredentials?: () => void;
 }
 
 // ============================================================================
@@ -135,6 +139,7 @@ function SortableAccountRow({
     onDelete,
     onToggleProxy,
     onUpdateLabel,
+    onUpdateCredentials,
 }: SortableRowProps) {
     const { t } = useTranslation();
     const {
@@ -197,6 +202,7 @@ function SortableAccountRow({
                 onDelete={onDelete}
                 onToggleProxy={onToggleProxy}
                 onUpdateLabel={onUpdateLabel}
+                onUpdateCredentials={onUpdateCredentials}
             />
         </tr>
     );
@@ -218,6 +224,7 @@ function AccountRowContent({
     onDelete,
     onToggleProxy,
     onUpdateLabel,
+    onUpdateCredentials,
 }: AccountRowContentProps) {
     const { t } = useTranslation();
     const { showAllQuotas } = useConfigStore();
@@ -476,6 +483,15 @@ function AccountRowContent({
                     >
                         <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
                     </button>
+                    {isDisabled && onUpdateCredentials && (
+                        <button
+                            className="p-1.5 text-amber-500 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-all animate-pulse"
+                            onClick={(e) => { e.stopPropagation(); onUpdateCredentials(); }}
+                            title={t('accounts.update_credentials', 'Update Credentials')}
+                        >
+                            <KeyRound className="w-3.5 h-3.5" />
+                        </button>
+                    )}
                     <button
                         className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg transition-all"
                         onClick={(e) => { e.stopPropagation(); onExport(); }}
@@ -536,6 +552,7 @@ function AccountTable({
     onToggleProxy,
     onReorder,
     onUpdateLabel,
+    onUpdateCredentials,
 }: AccountTableProps) {
     const { t } = useTranslation();
 
@@ -631,6 +648,7 @@ function AccountTable({
                                     onDelete={() => onDelete(account.id)}
                                     onToggleProxy={() => onToggleProxy(account.id)}
                                     onUpdateLabel={onUpdateLabel ? (label: string) => onUpdateLabel(account.id, label) : undefined}
+                                    onUpdateCredentials={onUpdateCredentials ? () => onUpdateCredentials(account.id) : undefined}
                                 />
                             ))}
                         </tbody>

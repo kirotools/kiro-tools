@@ -21,6 +21,7 @@ interface AccountState {
 
     toggleProxyStatus: (accountId: string, enable: boolean, reason?: string) => Promise<void>;
     updateAccountLabel: (accountId: string, label: string) => Promise<void>;
+    updateCredentials: (accountId: string, params: accountService.UpdateCredentialsParams) => Promise<void>;
 }
 
 export const useAccountStore = create<AccountState>((set, get) => ({
@@ -183,6 +184,18 @@ export const useAccountStore = create<AccountState>((set, get) => ({
             set({ accounts: updatedAccounts });
         } catch (error) {
             console.error('[AccountStore] Update label failed:', error);
+            throw error;
+        }
+    },
+
+    updateCredentials: async (accountId: string, params: accountService.UpdateCredentialsParams) => {
+        set({ loading: true, error: null });
+        try {
+            await accountService.updateAccountCredentials(accountId, params);
+            await get().fetchAccounts();
+            set({ loading: false });
+        } catch (error) {
+            set({ error: String(error), loading: false });
             throw error;
         }
     },

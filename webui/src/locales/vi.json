@@ -117,6 +117,16 @@
     "edit_label": "Chỉnh sửa nhãn",
     "custom_label_placeholder": "Nhập nhãn tùy chỉnh",
     "label_updated": "Đã cập nhật nhãn",
+    "update_credentials": "Cập nhật thông tin xác thực",
+    "update_creds": {
+      "title": "Cập nhật thông tin xác thực",
+      "desc": "Cung cấp tệp thông tin xác thực mới để kích hoạt lại tài khoản đã bị vô hiệu hóa này.",
+      "loading": "Đang cập nhật thông tin xác thực...",
+      "success": "Thông tin xác thực đã được cập nhật và tài khoản đã được kích hoạt lại!",
+      "file_label": "Đường dẫn tệp thông tin xác thực",
+      "hint": "Nhập đường dẫn đến tệp thông tin xác thực mới (ví dụ: từ Kiro IDE hoặc kiro-account-manager).",
+      "btn_update": "Cập nhật và kích hoạt lại"
+    },
     "add_account": "Thêm Tài khoản",
     "refresh_all": "Làm mới Tất cả",
     "refresh_selected": "Làm mới ({{count}})",

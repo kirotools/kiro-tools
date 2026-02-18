@@ -114,6 +114,16 @@
     "edit_label": "Sunting Label",
     "custom_label_placeholder": "Masukkan label tersuai",
     "label_updated": "Label dikemas kini",
+    "update_credentials": "Kemas Kini Kelayakan",
+    "update_creds": {
+      "title": "Kemas Kini Kelayakan",
+      "desc": "Sediakan fail kelayakan baharu untuk mengaktifkan semula akaun yang dilumpuhkan ini.",
+      "loading": "Mengemas kini kelayakan...",
+      "success": "Kelayakan dikemas kini dan akaun diaktifkan semula!",
+      "file_label": "Laluan Fail Kelayakan",
+      "hint": "Masukkan laluan ke fail kelayakan baharu (cth. dari Kiro IDE atau kiro-account-manager).",
+      "btn_update": "Kemas Kini & Aktifkan Semula"
+    },
     "add_account": "Tambah Akaun",
     "refresh_all": "Muat Semula Semua",
     "refresh_selected": "Muat Semula ({{count}})",

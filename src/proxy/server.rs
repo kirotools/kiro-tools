@@ -5,7 +5,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -503,6 +503,7 @@ impl AxumServer {
             .route("/accounts/export", post(admin_export_accounts))
             .route("/accounts/import", post(admin_import_accounts))
             .route("/accounts/:accountId/toggle-proxy", post(admin_toggle_proxy_status))
+            .route("/accounts/:accountId/credentials", put(admin_update_account_credentials))
             .route("/accounts/:accountId/quota", get(admin_fetch_account_quota))
             // System
             .route("/system/data-dir", get(admin_get_data_dir_path))
@@ -2011,6 +2012,60 @@ async fn admin_toggle_proxy_status(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCredentialsRequest {
+    #[serde(default, alias = "credsFile", alias = "creds_file")]
+    creds_file: Option<String>,
+    #[serde(default, alias = "sqliteDb", alias = "sqlite_db")]
+    sqlite_db: Option<String>,
+}
+
+async fn admin_update_account_credentials(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    Json(payload): Json<UpdateCredentialsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    if payload.creds_file.is_none() && payload.sqlite_db.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Either credsFile or sqliteDb must be provided".to_string(),
+            }),
+        ));
+    }
+
+    let account = state
+        .account_service
+        .update_credentials(
+            &account_id,
+            payload.creds_file.as_deref(),
+            payload.sqlite_db.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+
+    // Reload account into TokenManager
+    if let Err(e) = state.token_manager.load_accounts().await {
+        logger::log_error(&format!(
+            "[API] Failed to reload accounts after credential update: {}",
+            e
+        ));
+    }
+
+    let current_id = state.account_service.get_current_id().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+    Ok(Json(to_account_response(&account, &current_id, &state.token_manager)))
+}
 
 
 async fn admin_get_kiro_quota() -> impl IntoResponse {
