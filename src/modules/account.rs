@@ -1014,12 +1014,6 @@ pub fn add_account_with_source(
     let mut account = Account::new(account_id.clone(), email.clone(), token);
     account.name = name.clone();
 
-    // Store original source path BEFORE import replaces it with local copy.
-    // This allows recovery from invalid_grant by re-reading from the original source.
-    if creds_file.is_some() {
-        account.original_creds_source = creds_file.as_ref().map(|s| s.to_string());
-    }
-
     // [FIX] Copy-on-import: copy credential source to local data dir, sever link to original.
     // This prevents cross-account contamination when multiple accounts share the same source.
     match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
@@ -1104,11 +1098,6 @@ pub fn upsert_account_with_source(
                 account.encrypted = false; // Reset flag when assigning new plaintext token
                 account.name = name.clone();
 
-                // Store original source path BEFORE import replaces it with local copy.
-                if creds_file.is_some() {
-                    account.original_creds_source = creds_file.clone();
-                }
-
                 // [FIX] Copy-on-import: copy credential source to local, sever link to original.
                 if creds_file.is_some() || sqlite_db.is_some() {
                     match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {
@@ -1159,11 +1148,6 @@ pub fn upsert_account_with_source(
                 ));
                 let mut account = Account::new(account_id.clone(), email.clone(), token);
                 account.name = name.clone();
-
-                // Store original source path for recovery.
-                if creds_file.is_some() {
-                    account.original_creds_source = creds_file.clone();
-                }
 
                 // [FIX] Copy-on-import for recreated account
                 match import_creds_to_local(&account_id, creds_file.as_deref(), sqlite_db.as_deref()) {

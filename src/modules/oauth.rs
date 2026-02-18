@@ -69,16 +69,6 @@ pub async fn move_auth_manager(from_id: &str, to_id: &str) {
     }
 }
 
-/// Remove and drop a KiroAuthManager for an account.
-/// Used before recovery: discard the stale manager so `refresh_access_token_with_source`
-/// will create a fresh one from the original credential source.
-pub async fn remove_auth_manager(account_id: &str) {
-    let mut managers = get_auth_managers().lock().await;
-    if managers.remove(account_id).is_some() {
-        tracing::debug!("Removed AUTH_MANAGER for {}", account_id);
-    }
-}
-
 // ─── Core API (same signatures as before) ──────────────────────────────────
 
 /// Refresh access_token using Kiro auth.

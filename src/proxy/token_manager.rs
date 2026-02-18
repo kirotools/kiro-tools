@@ -125,57 +125,6 @@ impl TokenManager {
         }
     }
 
-    /// Read the `original_creds_source` from the account file on disk.
-    /// Returns `None` if the account doesn't have one or if the source file doesn't exist.
-    async fn get_original_creds_source(&self, account_id: &str) -> Option<String> {
-        let entry = self.tokens.get(account_id)?;
-        let path = entry.account_path.clone();
-        drop(entry);
-
-        let account = Self::load_account_from_path(&path).await.ok()?;
-        let source = account.original_creds_source?;
-        let expanded = shellexpand::tilde(&source).to_string();
-        if std::path::Path::new(&expanded).exists() {
-            Some(expanded)
-        } else {
-            None
-        }
-    }
-
-    /// Attempt to recover from invalid_grant by re-reading from the original
-    /// credential source (e.g. `~/.aws/sso/cache/kiro-auth-token.json`).
-    ///
-    /// When our local token chain breaks (import overwrite, IDE rotation, etc.),
-    /// the original source may have a valid refresh_token from Kiro IDE.
-    ///
-    /// Returns `Ok(TokenResponse)` if recovery succeeds, or `Err` if it also fails.
-    async fn try_recovery_from_original_source(
-        &self,
-        account_id: &str,
-        email: &str,
-    ) -> Option<Result<crate::modules::oauth::TokenResponse, String>> {
-        let original_source = self.get_original_creds_source(account_id).await?;
-
-        tracing::warn!(
-            "invalid_grant recovery: attempting refresh from original source for {} ({})",
-            email, original_source,
-        );
-
-        // Drop the stale cached auth manager so a fresh one will be created
-        // from the original source file.
-        crate::modules::oauth::remove_auth_manager(account_id).await;
-
-        let result = crate::modules::oauth::refresh_access_token_with_source(
-            None,
-            Some(&original_source),
-            None,
-            Some(account_id),
-        )
-        .await;
-
-        Some(result)
-    }
-
     pub async fn force_refresh_account_token(&self, account_id: &str) -> Result<crate::modules::oauth::TokenResponse, String> {
         let refresh_lock = self
             .refresh_locks
@@ -1505,49 +1454,19 @@ impl TokenManager {
                                 || e.contains("401")
                                 || e.contains("HTTP error: 401");
 
-                            // ── invalid_grant 恢复尝试 ────────────────────────────────
-                            // 若本地 token chain 因 re-import 覆盖或 IDE 轮转而断裂，
-                            // 尝试从原始凭据源 (kiro-auth-token.json) 恢复。
-                            let mut recovered = false;
-
                             if should_disable_immediately {
-                                if let Some(Ok(token_response)) = self
-                                    .try_recovery_from_original_source(&token.account_id, &token.email)
-                                    .await
-                                {
-                                    tracing::info!(
-                                        "invalid_grant recovery succeeded for {} from original source",
-                                        token.email
-                                    );
-                                    token.access_token = token_response.access_token.clone();
-                                    token.expires_in = token_response.expires_in;
-                                    token.timestamp = chrono::Utc::now().timestamp() + token_response.expires_in;
-                                    if let Some(ref new_rt) = token_response.refresh_token {
-                                        token.refresh_token = new_rt.clone();
-                                    }
-                                    if let Some(mut entry) = self.tokens.get_mut(&token.account_id) {
-                                        entry.access_token = token.access_token.clone();
-                                        entry.refresh_token = token.refresh_token.clone();
-                                        entry.expires_in = token.expires_in;
-                                        entry.timestamp = token.timestamp;
-                                    }
-                                    let _ = self.save_refreshed_token(&token.account_id, &token_response).await;
-                                    self.consecutive_refresh_failures.remove(&token.account_id);
-                                    recovered = true;
-                                } else {
-                                    tracing::error!(
-                                        "Disabling account due to invalid_grant ({}): refresh_token likely revoked/expired",
-                                        token.email
-                                    );
-                                    let _ = self
-                                        .disable_account(
-                                            &token.account_id,
-                                            &format!("invalid_grant: {}", e),
-                                        )
-                                        .await;
-                                    self.tokens.remove(&token.account_id);
-                                    self.consecutive_refresh_failures.remove(&token.account_id);
-                                }
+                                tracing::error!(
+                                    "Disabling account due to invalid_grant ({}): refresh_token likely revoked/expired",
+                                    token.email
+                                );
+                                let _ = self
+                                    .disable_account(
+                                        &token.account_id,
+                                        &format!("invalid_grant: {}", e),
+                                    )
+                                    .await;
+                                self.tokens.remove(&token.account_id);
+                                self.consecutive_refresh_failures.remove(&token.account_id);
                             } else if is_bad_credentials {
                                 let count = {
                                     let mut entry = self
@@ -1586,23 +1505,20 @@ impl TokenManager {
                                 self.consecutive_refresh_failures.remove(&token.account_id);
                             }
 
-                            if !recovered {
-                                // Avoid leaking account emails to API clients; details are still in logs.
-                                last_error = Some(format!("Token refresh failed: {}", e));
-                                attempted.insert(token.account_id.clone());
+                            // Avoid leaking account emails to API clients; details are still in logs.
+                            last_error = Some(format!("Token refresh failed: {}", e));
+                            attempted.insert(token.account_id.clone());
 
-                                // 【优化】标记需要清除锁定，避免在循环内加锁
-                                if quota_group != "image_gen" {
-                                    if matches!(&last_used_account_id, Some((id, _)) if id == &token.account_id)
-                                    {
-                                        need_update_last_used =
-                                            Some((String::new(), std::time::Instant::now()));
-                                        // 空字符串表示需要清除
-                                    }
+                            // 【优化】标记需要清除锁定，避免在循环内加锁
+                            if quota_group != "image_gen" {
+                                if matches!(&last_used_account_id, Some((id, _)) if id == &token.account_id)
+                                {
+                                    need_update_last_used =
+                                        Some((String::new(), std::time::Instant::now()));
+                                    // 空字符串表示需要清除
                                 }
-                                continue;
                             }
-                            // recovered == true: 恢复成功，fall through 使用已刷新的 token
+                            continue;
                         }
                     }
                 }
@@ -1885,35 +1801,6 @@ impl TokenManager {
                     || e.contains("HTTP error: 401");
 
                 if should_disable_immediately {
-                    // ── invalid_grant 恢复尝试（同主循环逻辑）──────────────────
-                    if let Some(Ok(token_response)) = self
-                        .try_recovery_from_original_source(&account_id, email)
-                        .await
-                    {
-                        tracing::info!(
-                            "get_token_by_email: invalid_grant recovery succeeded for {} from original source",
-                            email
-                        );
-                        let new_now = chrono::Utc::now().timestamp();
-                        if let Some(mut entry) = self.tokens.get_mut(&account_id) {
-                            entry.access_token = token_response.access_token.clone();
-                            entry.expires_in = token_response.expires_in;
-                            entry.timestamp = new_now;
-                            if let Some(ref new_rt) = token_response.refresh_token {
-                                entry.refresh_token = new_rt.clone();
-                            }
-                        }
-                        let _ = self.save_refreshed_token(&account_id, &token_response).await;
-                        self.consecutive_refresh_failures.remove(&account_id);
-                        return Ok((
-                            token_response.access_token,
-                            project_id,
-                            email.to_string(),
-                            account_id,
-                            0,
-                        ));
-                    }
-
                     tracing::error!(
                         "get_token_by_email: invalid_grant for {}, disabling account",
                         email
