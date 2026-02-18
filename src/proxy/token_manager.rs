@@ -1677,16 +1677,43 @@ impl TokenManager {
 
         tracing::info!("Token for {} is expiring, refreshing...", email);
 
-        match crate::modules::oauth::refresh_access_token(Some(&refresh_token), None, Some(&account_id)).await {
+        // Use get_refresh_inputs to get the latest refresh_token (may have rotated since
+        // the in-memory entry was last updated) and the creds_file / sqlite_db paths.
+        let (latest_rt, creds_file, sqlite_db) = self
+            .get_refresh_inputs(&account_id)
+            .await
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "get_refresh_inputs failed for {}, falling back to stale in-memory refresh_token",
+                    account_id
+                );
+                (refresh_token, None, None)
+            });
+
+        let rt = latest_rt.trim();
+        let rt_opt = if rt.is_empty() { None } else { Some(rt) };
+
+        match crate::modules::oauth::refresh_access_token_with_source(
+            rt_opt,
+            creds_file.as_deref(),
+            sqlite_db.as_deref(),
+            Some(&account_id),
+        )
+        .await
+        {
             Ok(token_response) => {
                 tracing::info!("Token refresh successful for {}", email);
                 let new_now = chrono::Utc::now().timestamp();
 
-                // 更新缓存
+                // 更新缓存（包含 Token Rotation 后的新 refresh_token）
                 if let Some(mut entry) = self.tokens.get_mut(&account_id) {
                     entry.access_token = token_response.access_token.clone();
                     entry.expires_in = token_response.expires_in;
                     entry.timestamp = new_now;
+                    // Update refresh_token if a new one was returned (token rotation)
+                    if let Some(ref new_rt) = token_response.refresh_token {
+                        entry.refresh_token = new_rt.clone();
+                    }
                 }
 
                 // 保存到磁盘
@@ -4109,5 +4136,110 @@ mod tests {
         assert_eq!(account_id, "acc2");
 
         std::fs::remove_dir_all(&tmp_root).ok();
+    }
+
+    // ── get_token_by_email Token Rotation 修复验证 ────────────────────────────
+
+    /// get_refresh_inputs 从磁盘读取最新的 refresh_token（而非 DashMap 中的旧值），
+    /// 确保 Token Rotation 后仍能使用新的 refresh_token。
+    #[tokio::test]
+    async fn test_get_refresh_inputs_returns_rotated_token_from_disk() {
+        let tmp = std::env::temp_dir().join(format!("kiro-rtinput-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-rot-input";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        // 磁盘上写入「已 Rotation」后的最新 refresh_token
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "rot@test.com",
+            "token": {
+                "access_token": "access-new",
+                "refresh_token": "refresh-rotated-new",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // 模拟 DashMap 中仍持有「旧的」refresh_token（尚未同步到内存）
+        if let Some(mut entry) = manager.tokens.get_mut(account_id) {
+            entry.refresh_token = "refresh-old-pre-rotation".to_string();
+        }
+
+        // get_refresh_inputs 应从磁盘读取，返回最新的 refresh_token
+        let (rt, _creds_file, _sqlite_db) = manager.get_refresh_inputs(account_id).await.unwrap();
+        assert_eq!(rt, "refresh-rotated-new",
+            "get_refresh_inputs 应从磁盘返回 Rotation 后的最新 refresh_token，而非 DashMap 中的旧值");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// get_token_by_email 刷新成功后，DashMap 中的 refresh_token 应更新为新值（Token Rotation）。
+    /// 本测试直接操作 sync_refreshed_token（与 get_token_by_email 内部逻辑相同）来验证内存同步。
+    #[tokio::test]
+    async fn test_get_token_by_email_updates_dashmap_refresh_token_on_rotation() {
+        let tmp = std::env::temp_dir().join(format!("kiro-gbte-rot-{}", uuid::Uuid::new_v4()));
+        let accounts_dir = tmp.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        let account_id = "acc-gbte-rot";
+        let now = chrono::Utc::now().timestamp();
+        let account_path = accounts_dir.join(format!("{}.json", account_id));
+
+        let account_json = serde_json::json!({
+            "id": account_id,
+            "email": "gbte@test.com",
+            "token": {
+                "access_token": "access-old",
+                "refresh_token": "refresh-old",
+                "expires_in": 3600,
+                "expiry_timestamp": now + 3600
+            },
+            "disabled": false,
+            "proxy_disabled": false,
+            "created_at": now,
+            "last_used": now
+        });
+        std::fs::write(&account_path, serde_json::to_string_pretty(&account_json).unwrap()).unwrap();
+
+        let manager = TokenManager::new(tmp.clone());
+        manager.load_accounts().await.unwrap();
+
+        // 模拟 Token Rotation 后服务端返回新的 refresh_token
+        let rotated_response = crate::modules::oauth::TokenResponse {
+            access_token: "access-new".to_string(),
+            expires_in: 3600,
+            token_type: "Bearer".to_string(),
+            refresh_token: Some("refresh-rotated".to_string()),
+        };
+
+        // sync_refreshed_token 会更新 DashMap 和磁盘（与修复后的 get_token_by_email 行为一致）
+        manager.sync_refreshed_token(account_id, &rotated_response).await.unwrap();
+
+        // 验证 DashMap 中 refresh_token 已更新
+        {
+            let entry = manager.tokens.get(account_id).unwrap();
+            assert_eq!(entry.access_token, "access-new");
+            assert_eq!(entry.refresh_token, "refresh-rotated",
+                "DashMap 中的 refresh_token 应在 Token Rotation 后同步更新");
+        }
+
+        // 验证磁盘上也保存了新的 refresh_token（供下次 get_refresh_inputs 读取）
+        let (disk_rt, _, _) = manager.get_refresh_inputs(account_id).await.unwrap();
+        assert_eq!(disk_rt, "refresh-rotated",
+            "磁盘上的 refresh_token 应与 Rotation 后的新值一致");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
